@@ -81,6 +81,10 @@ sudo: ## Runs the given $(TARGETS) as per run, but using "sudo -E". E.g. make su
 	@$(call sudo,$(TARGETS),$(ARGS))
 .PHONY: sudo
 
+sudo_test: ## Tests the given $(TARGETS) with the given $(OPTIONS) using sudo.
+	@$(call sudo_test,$(OPTIONS) -- $(TARGETS))
+.PHONY: sudo_test
+
 # Load image helpers.
 include tools/images.mk
 
@@ -173,6 +177,7 @@ install_runtime = $(call configure,$(1),$(2) --TESTONLY-test-name-env=RUNSC_TEST
 # Don't use cached results, otherwise multiple runs using different runtimes
 # may be skipped, if all other inputs are the same.
 test_runtime = $(call test,--test_env=RUNTIME=$(1) --nocache_test_results $(PARTITIONS) $(2))
+sudo_test_runtime = $(call sudo_test,--test_env=RUNTIME=$(1) --nocache_test_results $(PARTITIONS) $(2))
 test_runtime_cached = $(call test,--test_env=RUNTIME=$(1) $(PARTITIONS) $(2))
 
 refresh: $(RUNTIME_BIN) ## Updates the runtime binary.
@@ -436,9 +441,10 @@ nftables-tests: load-nftables $(RUNTIME_BIN)
 	@$(call test_runtime,$(RUNTIME),--test_env=TEST_NET_RAW=true //test/nftables:nftables_test)
 .PHONY: nftables-tests
 
-packetdrill-tests: load-packetdrill $(RUNTIME_BIN)
-	@$(call install_runtime,$(RUNTIME),) # Clear flags.
-	@$(call test_runtime,$(RUNTIME),//test/packetdrill:all_tests)
+packetdrill-tests: load-iptables $(RUNTIME_BIN)
+	@$(call install_runtime,runc,--net-raw)
+	@$(call sudo_test,//test/syscalls:socket_netlink_netfilter_test_native)
+#@$(call test_runtime,runc,--test_env=TEST_NET_RAW=true //test/syscalls:socket_netlink_netfilter_test_native)
 .PHONY: packetdrill-tests
 
 fsstress-test: load-basic $(RUNTIME_BIN)

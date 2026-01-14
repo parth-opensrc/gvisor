@@ -109,6 +109,7 @@ TEST_OPTIONS       += $(BASE_OPTIONS) \
   --incompatible_sandbox_hermetic_tmp=false \
   --test_output=$(BAZEL_TEST_OUTPUT) \
   --keep_going \
+	--test_output=streamed \
   --verbose_failures=true \
   --build_event_json_file=.build_events.json
 
@@ -325,6 +326,7 @@ copy  = $(call header,COPY $(1) $(2)) && $(call build_paths,$(1),cp -fa {} $(2))
 run   = $(call header,RUN $(1) $(2)) && $(call build_paths,$(1),{} $(2))
 sudo  = $(call header,SUDO $(1) $(2)) && $(call build_paths,$(1),sudo -E {} $(2))
 test  = $(call header,TEST $(1)) && $(call wrapper,$(BAZEL) test --strip=never $(BAZEL_OPTIONS) $(TEST_OPTIONS) $(1))
+sudo_test = $(call header,SUDO TEST $(1)) && sudo -E $(BAZEL) test --strip=never $(BAZEL_OPTIONS) $(TEST_OPTIONS) $(1)
 query = $(call wrapper,$(BAZEL) query $(BAZEL_OPTIONS) $(1))
 
 clean: ## Cleans the bazel cache.

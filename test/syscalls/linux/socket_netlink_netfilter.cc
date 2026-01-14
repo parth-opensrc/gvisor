@@ -1071,7 +1071,12 @@ TEST(NetlinkNetfilterTest,
 }
 
 TEST(NetlinkNetfilterTest, ErrNewBaseChainWithMalformedHookDataMissingHookNum) {
+  std::cout << "#########################" << "Failing test on gvisor" << std::endl;
+  std::cout << "#########################" << "HaveCap() = " << HaveCapability(CAP_NET_RAW).ok() << "value = " << HaveCapability(CAP_NET_RAW).ValueOrDie() << std::endl;
+  std::cout << "#########################" << "IsRunningOnGvisor() = " << IsRunningOnGvisor() << std::endl;
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+  std::cout << "!!!!!!!!!!!!!!!!!! Not skipping !!!!!!!!!!!!!!!!" << std::endl;
+  ASSERT_FALSE(IsRunningOnGvisor());
   std::string test_table_name = GetUniqueTestTableName();
   const char test_chain_name[] = "test_chain_bad_policy";
   const uint32_t test_policy = NF_ACCEPT;
