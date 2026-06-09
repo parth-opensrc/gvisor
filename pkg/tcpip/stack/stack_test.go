@@ -5396,7 +5396,7 @@ func TestWritePacketToRemote(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if err := s.WritePacketToRemote(nicID, linkAddr2, test.protocol, buffer.MakeWithData(test.payload)); err != nil {
+			if err := s.WritePacketToRemote(nicID, linkAddr2, test.protocol, buffer.MakeWithData(test.payload), 0); err != nil {
 				t.Fatalf("s.WritePacketToRemote(_, _, _, _) = %s", err)
 			}
 
@@ -5418,7 +5418,7 @@ func TestWritePacketToRemote(t *testing.T) {
 	}
 
 	t.Run("InvalidNICID", func(t *testing.T) {
-		err := s.WritePacketToRemote(234, linkAddr2, header.IPv4ProtocolNumber, buffer.MakeWithData([]byte{1}))
+		err := s.WritePacketToRemote(234, linkAddr2, header.IPv4ProtocolNumber, buffer.MakeWithData([]byte{1}), 0)
 		if _, ok := err.(*tcpip.ErrUnknownDevice); !ok {
 			t.Fatalf("s.WritePacketToRemote(_, _, _, _) = %s, want = %s", err, &tcpip.ErrUnknownDevice{})
 		}

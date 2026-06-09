@@ -17,6 +17,7 @@ exports_files(
         "raw_socket_icmp.cc",
         "socket.cc",
         "socket_inet_loopback.cc",
+        "socket_mark.cc",
         "socket_inet_loopback_isolated.cc",
         "socket_inet_loopback_test_params.h",
         "socket_ip_loopback_blocking.cc",
@@ -379,6 +380,22 @@ cc_binary(
     deps = select_gtest() + [
         "//test/util:capability_util",
         "//test/util:file_descriptor",
+        "//test/util:socket_util",
+        "//test/util:test_main",
+        "//test/util:test_util",
+    ],
+)
+
+cc_binary(
+    name = "socket_mark_test",
+    testonly = 1,
+    srcs = ["socket_mark.cc"],
+    linkstatic = 1,
+    malloc = "//test/util:errno_safe_allocator",
+    deps = select_gtest() + [
+        "//test/util:capability_util",
+        "//test/util:file_descriptor",
+        "//test/util:posix_error",
         "//test/util:socket_util",
         "//test/util:test_main",
         "//test/util:test_util",

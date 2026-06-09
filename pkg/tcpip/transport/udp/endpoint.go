@@ -281,6 +281,11 @@ func (e *endpoint) Read(dst io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResult
 		panic(fmt.Sprintf("unrecognized network protocol = %d", p.netProto))
 	}
 
+	if e.ops.GetRcvMark() {
+		cm.HasMark = true
+		cm.Mark = p.pkt.Mark
+	}
+
 	if e.ops.GetReceiveOriginalDstAddress() {
 		cm.HasOriginalDstAddress = true
 		cm.OriginalDstAddress = p.destinationAddress

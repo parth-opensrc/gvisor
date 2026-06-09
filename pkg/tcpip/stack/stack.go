@@ -2202,7 +2202,7 @@ func (s *Stack) unregisterPacketEndpointLocked(nicID tcpip.NICID, netProto tcpip
 
 // WritePacketToRemote writes a payload on the specified NIC using the provided
 // network protocol and remote link address.
-func (s *Stack) WritePacketToRemote(nicID tcpip.NICID, remote tcpip.LinkAddress, netProto tcpip.NetworkProtocolNumber, payload buffer.Buffer) tcpip.Error {
+func (s *Stack) WritePacketToRemote(nicID tcpip.NICID, remote tcpip.LinkAddress, netProto tcpip.NetworkProtocolNumber, payload buffer.Buffer, mark uint32) tcpip.Error {
 	s.mu.Lock()
 	nic, ok := s.nics[nicID]
 	s.mu.Unlock()
@@ -2212,6 +2212,7 @@ func (s *Stack) WritePacketToRemote(nicID tcpip.NICID, remote tcpip.LinkAddress,
 	pkt := NewPacketBuffer(PacketBufferOptions{
 		ReserveHeaderBytes: int(nic.MaxHeaderLength()),
 		Payload:            payload,
+		Mark:               mark,
 	})
 	defer pkt.DecRef()
 	pkt.NetworkProtocolNumber = netProto
@@ -2220,7 +2221,7 @@ func (s *Stack) WritePacketToRemote(nicID tcpip.NICID, remote tcpip.LinkAddress,
 
 // WriteRawPacket writes data directly to the specified NIC without adding any
 // headers.
-func (s *Stack) WriteRawPacket(nicID tcpip.NICID, proto tcpip.NetworkProtocolNumber, payload buffer.Buffer) tcpip.Error {
+func (s *Stack) WriteRawPacket(nicID tcpip.NICID, proto tcpip.NetworkProtocolNumber, payload buffer.Buffer, mark uint32) tcpip.Error {
 	s.mu.RLock()
 	nic, ok := s.nics[nicID]
 	s.mu.RUnlock()
@@ -2230,6 +2231,7 @@ func (s *Stack) WriteRawPacket(nicID tcpip.NICID, proto tcpip.NetworkProtocolNum
 
 	pkt := NewPacketBuffer(PacketBufferOptions{
 		Payload: payload,
+		Mark:    mark,
 	})
 	defer pkt.DecRef()
 	pkt.NetworkProtocolNumber = proto

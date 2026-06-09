@@ -237,6 +237,7 @@ type WriteContext struct {
 	ttl   uint8
 	tos   uint8
 	df    bool
+	mark  uint32
 }
 
 func (c *WriteContext) MTU() uint32 {
@@ -328,6 +329,7 @@ func (c *WriteContext) newPacketBufferLocked(reserveHdrBytes int, data buffer.Bu
 	return stack.NewPacketBuffer(stack.PacketBufferOptions{
 		ReserveHeaderBytes: reserveHdrBytes,
 		Payload:            data,
+		Mark:               c.mark,
 		OnRelease: func() {
 			e.sendBufferSizeInUseMu.Lock()
 			if got := e.sendBufferSizeInUse; got < pktSize {
@@ -588,12 +590,20 @@ func (e *Endpoint) AcquireContextForWrite(opts tcpip.WriteOptions) (WriteContext
 	// equivalent here.
 	df := e.pmtud == tcpip.PMTUDiscoveryWant || e.pmtud == tcpip.PMTUDiscoveryDo || e.pmtud == tcpip.PMTUDiscoveryProbe
 
+	var mark uint32
+	if opts.ControlMessages.HasMark {
+		mark = opts.ControlMessages.Mark
+	} else {
+		mark = e.ops.GetMark()
+	}
+
 	return WriteContext{
 		e:     e,
 		route: route,
 		ttl:   ttl,
 		tos:   tos,
 		df:    df,
+		mark:  mark,
 	}, nil
 }
 

@@ -67,7 +67,7 @@ func TestWritePacketFromBridge(t *testing.T) {
 		t.Fatalf("s.SetNICCoordinator(%d, %d)", nicID2, bridgeID)
 	}
 	// When writing packets, the bridge will try all available bridge ports.
-	if err := s.WritePacketToRemote(bridgeID, remoteLinkAddr, netProto, buffer.Buffer{}); err != nil {
+	if err := s.WritePacketToRemote(bridgeID, remoteLinkAddr, netProto, buffer.Buffer{}, 0); err != nil {
 		t.Fatalf("s.WritePacketToRemote(%d, %s, _): %s", bridgeID, remoteLinkAddr, err)
 	}
 	for _, c := range []*channel.Endpoint{ch1, ch2} {
@@ -160,7 +160,7 @@ func TestWritePacketBetweenDevices(t *testing.T) {
 	ch2.AddNotify(n2)
 	// Write a packet to the veth device at the stack secondStack, the packet
 	// will be available at the veth device at the stack s.
-	if err := secondStack.WritePacketToRemote(vethID, remoteLinkAddr, netProto, buffer.Buffer{}); err != nil {
+	if err := secondStack.WritePacketToRemote(vethID, remoteLinkAddr, netProto, buffer.Buffer{}, 0); err != nil {
 		t.Fatalf("s.WritePacketToRemote(%d, %s, _): %s", bridgeID, remoteLinkAddr, err)
 	}
 	<-n1.ch
@@ -229,7 +229,7 @@ func TestBridgeFDB(t *testing.T) {
 	ch.AddNotify(n)
 	// Write a packet to the veth device at secondStack, the
 	// packet will be available at stack s via veth.
-	if err := secondStack.WritePacketToRemote(vethID2, remoteLinkAddr, netProto, buffer.Buffer{}); err != nil {
+	if err := secondStack.WritePacketToRemote(vethID2, remoteLinkAddr, netProto, buffer.Buffer{}, 0); err != nil {
 		t.Fatalf("s.WritePacketToRemote(%d, %s, _): %s", bridgeID, remoteLinkAddr, err)
 	}
 	<-n.ch
@@ -321,7 +321,7 @@ func TestNicExitingStackExitsBridgeToo(t *testing.T) {
 	}
 
 	// The bridge should forward pkts to the nic.
-	if err := src.WritePacketToRemote(bridgeID, remoteLinkAddr, netProto, buffer.Buffer{}); err != nil {
+	if err := src.WritePacketToRemote(bridgeID, remoteLinkAddr, netProto, buffer.Buffer{}, 0); err != nil {
 		t.Fatalf("s.WritePacketToRemote(%d, %s, _): %s", bridgeID, remoteLinkAddr, err)
 	}
 	pkt := ch.Read()
@@ -338,7 +338,7 @@ func TestNicExitingStackExitsBridgeToo(t *testing.T) {
 
 	// The bridge should no longer forward pkts to the nic, lest it defeat the purpose of network
 	// namespaces.
-	if err := src.WritePacketToRemote(bridgeID, remoteLinkAddr, netProto, buffer.Buffer{}); err != nil {
+	if err := src.WritePacketToRemote(bridgeID, remoteLinkAddr, netProto, buffer.Buffer{}, 0); err != nil {
 		t.Fatalf("s.WritePacketToRemote(%d, %s, _): %s", bridgeID, remoteLinkAddr, err)
 	}
 	pkt = ch.Read()

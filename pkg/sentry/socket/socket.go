@@ -141,6 +141,8 @@ func NewIPControlMessages(family int, cmgs tcpip.ReceivableControlMessages) IPCo
 		HasIPv6PacketInfo:  cmgs.HasIPv6PacketInfo,
 		OriginalDstAddress: orgDstAddr,
 		SockErr:            sockErrCmsgToLinux(cmgs.SockErr),
+		HasMark:            cmgs.HasMark,
+		Mark:               cmgs.Mark,
 	}
 
 	if cm.HasIPv6PacketInfo {
@@ -210,6 +212,12 @@ type IPControlMessages struct {
 
 	// SockErr is the dequeued socket error on recvmsg(MSG_ERRQUEUE).
 	SockErr linux.SockErrCMsg
+
+	// HasMark indicates whether Mark is valid/set.
+	HasMark bool
+
+	// Mark is the socket mark of the associated packet.
+	Mark uint32
 }
 
 // Release releases Unix domain socket credentials and rights.

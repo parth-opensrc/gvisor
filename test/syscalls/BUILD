@@ -764,6 +764,11 @@ syscall_test(
 )
 
 syscall_test(
+    add_hostinet = True,
+    test = "//test/syscalls/linux:socket_mark_test",
+)
+
+syscall_test(
     size = "medium",
     test = "//test/syscalls/linux:socket_domain_non_blocking_test",
 )

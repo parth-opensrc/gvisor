@@ -240,6 +240,17 @@ func PackTClass(t *kernel.Task, tClass uint32, buf []byte) []byte {
 	)
 }
 
+// PackMark packs an SO_MARK socket control message.
+func PackMark(t *kernel.Task, mark uint32, buf []byte) []byte {
+	return putCmsgStruct(
+		buf,
+		linux.SOL_SOCKET,
+		linux.SO_MARK,
+		t.Arch().Width(),
+		primitive.AllocateUint32(mark),
+	)
+}
+
 // PackTTL packs an IP_TTL socket control message.
 func PackTTL(t *kernel.Task, ttl uint32, buf []byte) []byte {
 	return putCmsgStruct(
@@ -361,6 +372,10 @@ func PackControlMessages(t *kernel.Task, cmsgs socket.ControlMessages, buf []byt
 		buf = PackSockExtendedErr(t, cmsgs.IP.SockErr, buf)
 	}
 
+	if cmsgs.IP.HasMark {
+		buf = PackMark(t, cmsgs.IP.Mark, buf)
+	}
+
 	return buf
 }
 
@@ -412,6 +427,10 @@ func CmsgsSpace(t *kernel.Task, cmsgs socket.ControlMessages) int {
 
 	if cmsgs.IP.SockErr != nil {
 		space += cmsgSpace(t, cmsgs.IP.SockErr.SizeBytes())
+	}
+
+	if cmsgs.IP.HasMark {
+		space += cmsgSpace(t, linux.SizeOfControlMessageMark)
 	}
 
 	return space
@@ -472,6 +491,18 @@ func Parse(t *kernel.Task, socketOrEndpoint any, buf []byte, width uint) (socket
 					return socket.ControlMessages{}, err
 				}
 				cmsgs.Unix.Credentials = scmCreds
+
+			case linux.SO_MARK:
+				if length != linux.SizeOfControlMessageMark {
+					return socket.ControlMessages{}, linuxerr.EINVAL
+				}
+				if !t.HasCapabilityIn(linux.CAP_NET_RAW, t.NetworkNamespace().UserNamespace()) &&
+					!t.HasCapabilityIn(linux.CAP_NET_ADMIN, t.NetworkNamespace().UserNamespace()) {
+					return socket.ControlMessages{}, linuxerr.EPERM
+				}
+				cmsgs.IP.HasMark = true
+				// Matches Linux net/core/sock.c:__sock_cmsg_send()
+				cmsgs.IP.Mark = hostarch.ByteOrder.Uint32(buf[:linux.SizeOfControlMessageMark])
 
 			case linux.SO_TIMESTAMP:
 				if length < linux.SizeOfTimeval {

@@ -226,6 +226,11 @@ func (e *endpoint) Read(dst io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResult
 		panic(fmt.Sprintf("unrecognized network protocol = %d", netProto))
 	}
 
+	if e.ops.GetRcvMark() {
+		cm.HasMark = true
+		cm.Mark = p.data.Mark
+	}
+
 	res := tcpip.ReadResult{
 		Total:           p.data.Data().Size(),
 		ControlMessages: cm,
@@ -761,7 +766,11 @@ func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketB
 	// headers from the front of the packet.
 	pktBuf := pkt.ToBuffer()
 	pktBuf.TrimFront(int64(pkt.HeaderSize() - len(pkt.TransportHeader().Slice())))
-	packet.data = stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: pktBuf})
+	// Matches Linux net/core/skbuff.c:__copy_skb_header()
+	packet.data = stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Payload: pktBuf,
+		Mark:    pkt.Mark,
+	})
 
 	e.rcvList.PushBack(packet)
 	e.rcvBufSize += packet.data.Data().Size()

@@ -267,6 +267,12 @@ type SocketOptions struct {
 	// experimentOptionValue is the value set for the IP option experiment header
 	// if it is not zero.
 	experimentOptionValue atomicbitops.Uint32
+
+	// mark is the socket mark.
+	mark atomicbitops.Uint32
+
+	// rcvMark determines whether to pass the mark with incoming packets.
+	rcvMark atomicbitops.Uint32
 }
 
 // InitHandler initializes the handler. This must be called before using the
@@ -770,4 +776,24 @@ func (so *SocketOptions) SetRcvlowat(rcvlowat int32) Error {
 // GetAcceptConn gets value for SO_ACCEPTCONN option.
 func (so *SocketOptions) GetAcceptConn() bool {
 	return so.handler.GetAcceptConn()
+}
+
+// GetMark gets value for SO_MARK option.
+func (so *SocketOptions) GetMark() uint32 {
+	return so.mark.Load()
+}
+
+// SetMark sets value for SO_MARK option.
+func (so *SocketOptions) SetMark(v uint32) {
+	so.mark.Store(v)
+}
+
+// GetRcvMark gets value for SO_RCVMARK option.
+func (so *SocketOptions) GetRcvMark() bool {
+	return so.rcvMark.Load() != 0
+}
+
+// SetRcvMark sets value for SO_RCVMARK option.
+func (so *SocketOptions) SetRcvMark(v bool) {
+	storeAtomicBool(&so.rcvMark, v)
 }

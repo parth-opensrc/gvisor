@@ -203,12 +203,18 @@ func (ep *endpoint) Read(dst io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResul
 
 	ep.rcvMu.Unlock()
 
+	cm := tcpip.ReceivableControlMessages{
+		HasTimestamp: true,
+		Timestamp:    packet.receivedAt,
+	}
+	if ep.ops.GetRcvMark() {
+		cm.HasMark = true
+		cm.Mark = packet.data.Mark
+	}
+
 	res := tcpip.ReadResult{
-		Total: packet.data.Size(),
-		ControlMessages: tcpip.ReceivableControlMessages{
-			HasTimestamp: true,
-			Timestamp:    packet.receivedAt,
-		},
+		Total:           packet.data.Size(),
+		ControlMessages: cm,
 	}
 	if opts.NeedRemoteAddr {
 		res.RemoteAddr = packet.senderAddr
@@ -267,11 +273,18 @@ func (ep *endpoint) Write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, tc
 	}
 	payloadSz := payload.Size()
 
+	var mark uint32
+	if opts.ControlMessages.HasMark {
+		mark = opts.ControlMessages.Mark
+	} else {
+		mark = ep.ops.GetMark()
+	}
+
 	if err := func() tcpip.Error {
 		if ep.cooked {
-			return ep.stack.WritePacketToRemote(nicID, remote, proto, payload)
+			return ep.stack.WritePacketToRemote(nicID, remote, proto, payload, mark)
 		}
-		return ep.stack.WriteRawPacket(nicID, proto, payload)
+		return ep.stack.WriteRawPacket(nicID, proto, payload, mark)
 	}(); err != nil {
 		return 0, err
 	}
@@ -556,7 +569,11 @@ func (ep *endpoint) handlePacketInner(nicID tcpip.NICID, netProto tcpip.NetworkP
 		// packets.
 		pktBuf.TrimFront(int64(len(pkt.LinkHeader().Slice()) + len(pkt.VirtioNetHeader().Slice())))
 	}
-	rcvdPkt.data = stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: pktBuf})
+	// Matches Linux net/core/skbuff.c:__copy_skb_header()
+	rcvdPkt.data = stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Payload: pktBuf,
+		Mark:    pkt.Mark,
+	})
 
 	ep.rcvList.PushBack(&rcvdPkt)
 	ep.rcvBufSize += rcvdPkt.data.Size()

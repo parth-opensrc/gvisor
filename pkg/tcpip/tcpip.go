@@ -621,6 +621,12 @@ type SendableControlMessages struct {
 
 	// IPv6PacketInfo holds interface and address data on an incoming packet.
 	IPv6PacketInfo IPv6PacketInfo
+
+	// HasMark indicates whether Mark is valid/set.
+	HasMark bool
+
+	// Mark is the socket mark associated with the packet.
+	Mark uint32
 }
 
 // ReceivableControlMessages contains socket control messages that can be
@@ -687,6 +693,12 @@ type ReceivableControlMessages struct {
 
 	// SockErr is the dequeued socket error on recvmsg(MSG_ERRQUEUE).
 	SockErr *SockError
+
+	// HasMark indicates whether Mark is valid/set.
+	HasMark bool
+
+	// Mark is the socket mark associated with the packet.
+	Mark uint32
 }
 
 // PacketOwner is used to get UID and GID of the packet.

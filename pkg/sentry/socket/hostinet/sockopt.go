@@ -101,6 +101,8 @@ var SockOpts = []SockOpt{
 	{linux.SOL_SOCKET, linux.SO_RCVLOWAT, sizeofInt32, true, true, false},
 	{linux.SOL_SOCKET, linux.SO_REUSEADDR, sizeofInt32, true, true, false},
 	{linux.SOL_SOCKET, linux.SO_REUSEPORT, sizeofInt32, true, true, false},
+	{linux.SOL_SOCKET, linux.SO_MARK, sizeofInt32, true, true, false},
+	{linux.SOL_SOCKET, linux.SO_RCVMARK, sizeofInt32, true, true, false},
 	{linux.SOL_SOCKET, linux.SO_SNDBUF, sizeofInt32, true, true, false},
 	{linux.SOL_SOCKET, linux.SO_TIMESTAMP, sizeofInt32, true, true, false},
 
@@ -229,6 +231,12 @@ func (s *Socket) SetSockOpt(t *kernel.Task, level, name int, opt []byte) *syserr
 			}
 			s.SetSendTimeout(v.ToNsecCapped())
 			return nil
+		}
+	}
+	if level == linux.SOL_SOCKET && name == linux.SO_MARK {
+		if !t.HasCapabilityIn(linux.CAP_NET_RAW, t.NetworkNamespace().UserNamespace()) &&
+			!t.HasCapabilityIn(linux.CAP_NET_ADMIN, t.NetworkNamespace().UserNamespace()) {
+			return syserr.ErrNotPermitted
 		}
 	}
 	sockOpt, ok := sockOptMap[levelName{uint64(level), uint64(name)}]

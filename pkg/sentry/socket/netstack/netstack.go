@@ -1068,6 +1068,22 @@ func GetSockOptSocket(t *kernel.Task, s socket.Socket, ep commonEndpoint, family
 		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetReusePort()))
 		return &v, nil
 
+	case linux.SO_MARK:
+		if outLen < sizeOfInt32 {
+			return nil, syserr.ErrInvalidArgument
+		}
+		// Matches Linux net/core/sock.c:sock_getsockopt()
+		v := primitive.Int32(ep.SocketOptions().GetMark())
+		return &v, nil
+
+	case linux.SO_RCVMARK:
+		if outLen < sizeOfInt32 {
+			return nil, syserr.ErrInvalidArgument
+		}
+		// Matches Linux net/core/sock.c:sock_getsockopt()
+		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetRcvMark()))
+		return &v, nil
+
 	case linux.SO_BINDTODEVICE:
 		v := ep.SocketOptions().GetBindToDevice()
 		if v == 0 {
@@ -2020,6 +2036,28 @@ func SetSockOptSocket(t *kernel.Task, s socket.Socket, ep commonEndpoint, name i
 		ep.SocketOptions().SetReuseAddress(v != 0)
 		return nil
 
+	case linux.SO_MARK:
+		if len(optVal) < sizeOfInt32 {
+			return syserr.ErrInvalidArgument
+		}
+		if !t.HasCapabilityIn(linux.CAP_NET_RAW, t.NetworkNamespace().UserNamespace()) &&
+			!t.HasCapabilityIn(linux.CAP_NET_ADMIN, t.NetworkNamespace().UserNamespace()) {
+			return syserr.ErrNotPermitted
+		}
+		v := hostarch.ByteOrder.Uint32(optVal)
+		// Matches Linux net/core/sock.c:sock_setsockopt()
+		ep.SocketOptions().SetMark(v)
+		return nil
+
+	case linux.SO_RCVMARK:
+		if len(optVal) < sizeOfInt32 {
+			return syserr.ErrInvalidArgument
+		}
+		v := hostarch.ByteOrder.Uint32(optVal)
+		// Matches Linux net/core/sock.c:sock_setsockopt()
+		ep.SocketOptions().SetRcvMark(v != 0)
+		return nil
+
 	case linux.SO_REUSEPORT:
 		if len(optVal) < sizeOfInt32 {
 			return syserr.ErrInvalidArgument
@@ -2173,7 +2211,6 @@ func SetSockOptSocket(t *kernel.Task, s socket.Socket, ep commonEndpoint, name i
 		linux.SO_SNDBUFFORCE,
 		linux.SO_PASSSEC,
 		linux.SO_TIMESTAMPNS,
-		linux.SO_MARK,
 		linux.SO_TIMESTAMPING,
 		linux.SO_PROTOCOL,
 		linux.SO_DOMAIN,
@@ -2210,7 +2247,6 @@ func SetSockOptSocket(t *kernel.Task, s socket.Socket, ep commonEndpoint, name i
 		linux.SO_BUF_LOCK,
 		linux.SO_RESERVE_MEM,
 		linux.SO_TXREHASH,
-		linux.SO_RCVMARK,
 		linux.SO_PASSPIDFD,
 		linux.SO_PEERPIDFD,
 		linux.SO_DEVMEM_LINEAR,
@@ -3211,6 +3247,8 @@ func (s *sock) netstackToLinuxControlMessages(cm tcpip.ReceivableControlMessages
 			IPv6PacketInfo:     readCM.IPv6PacketInfo,
 			OriginalDstAddress: readCM.OriginalDstAddress,
 			SockErr:            readCM.SockErr,
+			HasMark:            readCM.HasMark && s.Endpoint.SocketOptions().GetRcvMark(),
+			Mark:               readCM.Mark,
 		},
 	}
 }
@@ -3221,6 +3259,8 @@ func (s *sock) linuxToNetstackControlMessages(cm socket.ControlMessages) tcpip.S
 		TTL:         uint8(cm.IP.TTL),
 		HasHopLimit: cm.IP.HasHopLimit,
 		HopLimit:    uint8(cm.IP.HopLimit),
+		HasMark:     cm.IP.HasMark,
+		Mark:        cm.IP.Mark,
 	}
 }
 

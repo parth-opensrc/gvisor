@@ -731,6 +731,9 @@ const SizeOfControlMessageIPPacketInfo = 12
 // ControlMessageIPv6PacketInfo.
 const SizeOfControlMessageIPv6PacketInfo = 20
 
+// SizeOfControlMessageMark is the size of an SO_MARK control message.
+const SizeOfControlMessageMark = 4
+
 // SCM_MAX_FD is the maximum number of FDs accepted in a single sendmsg call.
 // From net/scm.h.
 const SCM_MAX_FD = 253

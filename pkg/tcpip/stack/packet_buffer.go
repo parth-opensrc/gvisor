@@ -57,6 +57,9 @@ type PacketBufferOptions struct {
 	// OnRelease is a function to be run when the packet buffer is no longer
 	// referenced (released back to the pool).
 	OnRelease func()
+
+	// Mark is the socket mark associated with the packet.
+	Mark uint32
 }
 
 // A PacketBuffer contains all the data of a network packet.
@@ -131,6 +134,9 @@ type PacketBuffer struct {
 	// indicates no valid hash has been set.
 	Hash uint32
 
+	// Mark is the socket mark associated with the packet.
+	Mark uint32
+
 	// Owner is implemented by task to get the uid and gid.
 	// Only set for locally generated packets.
 	Owner tcpip.PacketOwner
@@ -183,6 +189,7 @@ func NewPacketBuffer(opts PacketBufferOptions) *PacketBuffer {
 	}
 	pk.NetworkPacketInfo.IsForwardedPacket = opts.IsForwardedPacket
 	pk.onRelease = opts.OnRelease
+	pk.Mark = opts.Mark
 	pk.InitRefs()
 	return pk
 }
@@ -376,6 +383,7 @@ func (pk *PacketBuffer) Clone() *PacketBuffer {
 	newPk.reset()
 	newPk.buf = pk.buf.Clone()
 	newPk.reserved = pk.reserved
+	newPk.Mark = pk.Mark
 	newPk.pushed = pk.pushed
 	newPk.consumed = pk.consumed
 	newPk.headers = pk.headers
@@ -430,6 +438,7 @@ func (pk *PacketBuffer) CloneToInbound() *PacketBuffer {
 	newPk.reset()
 	newPk.buf = pk.buf.Clone()
 	newPk.InitRefs()
+	newPk.Mark = pk.Mark
 	// Treat unfilled header portion as reserved.
 	newPk.reserved = pk.AvailableHeaderBytes()
 	newPk.tuple = pk.tuple
@@ -448,6 +457,7 @@ func (pk *PacketBuffer) DeepCopyForForwarding(reservedHeaderBytes int) *PacketBu
 		ReserveHeaderBytes: reservedHeaderBytes,
 		Payload:            payload.DeepClone(),
 		IsForwardedPacket:  true,
+		Mark:               pk.Mark,
 	})
 
 	{

@@ -117,8 +117,10 @@ func (e *endpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) 
 		// In order to properly loop back to the inbound side we must create a
 		// fresh packet that only contains the underlying payload with no headers
 		// or struct fields set.
+		// Matches Linux net/core/skbuff.c:__copy_skb_header()
 		newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 			Payload: pkt.ToBuffer(),
+			Mark:    pkt.Mark,
 		})
 		if d != nil {
 			d.DeliverNetworkPacket(pkt.NetworkProtocolNumber, newPkt)
