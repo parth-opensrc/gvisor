@@ -78,7 +78,7 @@ func (*snatTargetMakerV4) marshal(target target) []byte {
 	return marshal.Marshal(&xt)
 }
 
-func (*snatTargetMakerV4) unmarshal(buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
+func (*snatTargetMakerV4) unmarshal(stk *stack.Stack, buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
 	if len(buf) < linux.SizeOfXTNATTargetV0 {
 		nflog("snatTargetMakerV4: buf has insufficient size for snat target %d", len(buf))
 		return nil, syserr.ErrInvalidArgument
@@ -161,7 +161,7 @@ func (*snatTargetMakerR1) marshal(target target) []byte {
 	return marshal.Marshal(&nt)
 }
 
-func (st *snatTargetMakerR1) unmarshal(buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
+func (st *snatTargetMakerR1) unmarshal(stk *stack.Stack, buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
 	if size := linux.SizeOfXTNATTargetV1; len(buf) < size {
 		nflog("snatTargetMakerR1: buf has insufficient size (%d) for SNAT target (%d)", len(buf), size)
 		return nil, syserr.ErrInvalidArgument
@@ -246,7 +246,7 @@ func (*snatTargetMakerR2) marshal(target target) []byte {
 	return marshal.Marshal(&nt)
 }
 
-func (st *snatTargetMakerR2) unmarshal(buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
+func (st *snatTargetMakerR2) unmarshal(stk *stack.Stack, buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
 	if size := linux.SizeOfXTNATTargetV2; len(buf) < size {
 		nflog("snatTargetMakerR2: buf has insufficient size (%d) for SNAT target (%d)", len(buf), size)
 		return nil, syserr.ErrInvalidArgument

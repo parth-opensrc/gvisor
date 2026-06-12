@@ -120,6 +120,7 @@ func (e *endpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) 
 		newPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 			Payload: pkt.ToBuffer(),
 		})
+		newPkt.FromRawSocket = pkt.FromRawSocket
 		if d != nil {
 			d.DeliverNetworkPacket(pkt.NetworkProtocolNumber, newPkt)
 		}

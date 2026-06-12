@@ -146,7 +146,7 @@ type targetMaker interface {
 	marshal(target target) []byte
 
 	// unmarshal converts from the ABI matcher struct to a target.
-	unmarshal(buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error)
+	unmarshal(stk *stack.Stack, buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error)
 }
 
 // A targetID uniquely identifies a target.
@@ -218,7 +218,7 @@ func marshalTarget(tgt stack.Target) []byte {
 	return targetMaker.marshal(target)
 }
 
-func unmarshalTarget(target linux.XTEntryTarget, filter stack.IPHeaderFilter, buf []byte) (target, *syserr.Error) {
+func unmarshalTarget(stk *stack.Stack, target linux.XTEntryTarget, filter stack.IPHeaderFilter, buf []byte) (target, *syserr.Error) {
 	tid := targetID{
 		name:            target.Name.String(),
 		networkProtocol: filter.NetworkProtocol(),
@@ -229,5 +229,18 @@ func unmarshalTarget(target linux.XTEntryTarget, filter stack.IPHeaderFilter, bu
 		nflog("unsupported target with name %q, proto %d, and revision %d", target.Name.String(), tid.networkProtocol, tid.revision)
 		return nil, syserr.ErrInvalidArgument
 	}
-	return targetMaker.unmarshal(buf, filter)
+	return targetMaker.unmarshal(stk, buf, filter)
+}
+
+// peekTransportHeader returns the transport header slice of the packet. If the
+// transport header has not been parsed yet, it attempts to pull it up from the
+// data part of the packet.
+func peekTransportHeader(pkt *stack.PacketBuffer, minSize int) []byte {
+	th := pkt.TransportHeader().Slice()
+	if len(th) == 0 && minSize > 0 {
+		if hdr, ok := pkt.Data().PullUp(minSize); ok {
+			return hdr
+		}
+	}
+	return th
 }

@@ -137,6 +137,7 @@ func newEndpoint(s *stack.Stack, netProto tcpip.NetworkProtocolNumber, transProt
 	e.ops.SetSendBufferSize(32*1024, false /* notify */)
 	e.ops.SetReceiveBufferSize(32*1024, false /* notify */)
 	e.net.Init(s, netProto, transProto, &e.ops, waiterQueue)
+	e.net.IsRaw = true
 
 	// Override with stack defaults.
 	var ss tcpip.SendBufferSizeOption
@@ -305,10 +306,6 @@ func (e *endpoint) Read(dst io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResult
 // Write implements tcpip.Endpoint.Write.
 func (e *endpoint) Write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, tcpip.Error) {
 	netProto := e.net.NetProto()
-	// We can create, but not write to, unassociated IPv6 endpoints.
-	if !e.associated && netProto == header.IPv6ProtocolNumber {
-		return 0, &tcpip.ErrInvalidOptionValue{}
-	}
 
 	if opts.To != nil {
 		// Raw sockets do not support sending to a IPv4 address on a IPv6 endpoint.

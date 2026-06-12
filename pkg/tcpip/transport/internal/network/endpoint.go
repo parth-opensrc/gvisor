@@ -110,6 +110,9 @@ type Endpoint struct {
 	//
 	// +checklocks:sendBufferSizeInUseMu
 	sendBufferSizeInUse int64 `state:"nosave"`
+
+	// IsRaw indicates if this endpoint is for a raw socket.
+	IsRaw bool
 }
 
 // +stateify savable
@@ -325,7 +328,7 @@ func (c *WriteContext) newPacketBufferLocked(reserveHdrBytes int, data buffer.Bu
 	pktSize := int64(reserveHdrBytes) + int64(data.Size())
 	e.sendBufferSizeInUse += pktSize
 
-	return stack.NewPacketBuffer(stack.PacketBufferOptions{
+	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		ReserveHeaderBytes: reserveHdrBytes,
 		Payload:            data,
 		OnRelease: func() {
@@ -344,6 +347,8 @@ func (c *WriteContext) newPacketBufferLocked(reserveHdrBytes int, data buffer.Bu
 			}
 		},
 	})
+	pkt.FromRawSocket = e.IsRaw
+	return pkt
 }
 
 // WritePacket attempts to write the packet.
@@ -367,6 +372,7 @@ func (c *WriteContext) WritePacket(pkt *stack.PacketBuffer, headerIncluded bool)
 		TOS:                   c.tos,
 		DF:                    c.df,
 		ExperimentOptionValue: expOptVal,
+		FromRawSocket:         c.e.IsRaw,
 	}, pkt)
 
 	if _, ok := err.(*tcpip.ErrNoBufferSpace); ok {

@@ -218,6 +218,11 @@ func (b ICMPv4) SetSequence(sequence uint16) {
 // ICMPv4Checksum calculates the ICMP checksum over the provided ICMP header,
 // and payload.
 func ICMPv4Checksum(h ICMPv4, payloadCsum uint16) uint16 {
+	// Matches gVisor pkg/tcpip/checksum/checksum.go:Checksumer: if the preceding bytes (header) has odd length,
+	// the payload checksum starts at an odd offset and must be byte-swapped to align correctly.
+	if len(h)%2 != 0 {
+		payloadCsum = (payloadCsum >> 8) | (payloadCsum << 8)
+	}
 	xsum := payloadCsum
 
 	// h[2:4] is the checksum itself, skip it to avoid checksumming the checksum.

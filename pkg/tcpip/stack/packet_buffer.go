@@ -159,6 +159,9 @@ type PacketBuffer struct {
 	// safely skipped.
 	RXChecksumValidated bool
 
+	// FromRawSocket indicates that the packet was generated from a raw socket.
+	FromRawSocket bool
+
 	// NetworkPacketInfo holds an incoming packet's network-layer information.
 	NetworkPacketInfo NetworkPacketInfo
 

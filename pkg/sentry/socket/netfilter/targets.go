@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/bits"
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/marshal"
 	"gvisor.dev/gvisor/pkg/syserr"
@@ -101,6 +102,14 @@ func init() {
 		NetworkProtocol: header.IPv4ProtocolNumber,
 	})
 	registerTargetMaker(&dnatTargetMakerR2{
+		NetworkProtocol: header.IPv6ProtocolNumber,
+	})
+
+	// REJECT targets.
+	registerTargetMaker(&rejectTargetMaker{
+		NetworkProtocol: header.IPv4ProtocolNumber,
+	})
+	registerTargetMaker(&rejectTargetMaker{
 		NetworkProtocol: header.IPv6ProtocolNumber,
 	})
 }
@@ -220,7 +229,7 @@ func (*standardTargetMaker) marshal(target target) []byte {
 	return marshal.Marshal(&xt)
 }
 
-func (*standardTargetMaker) unmarshal(buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
+func (*standardTargetMaker) unmarshal(stk *stack.Stack, buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
 	if len(buf) != linux.SizeOfXTStandardTarget {
 		nflog("buf has wrong size for standard target %d", len(buf))
 		return nil, syserr.ErrInvalidArgument
@@ -275,7 +284,7 @@ func (*errorTargetMaker) marshal(target target) []byte {
 	return marshal.Marshal(&xt)
 }
 
-func (*errorTargetMaker) unmarshal(buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
+func (*errorTargetMaker) unmarshal(stk *stack.Stack, buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
 	if len(buf) != linux.SizeOfXTErrorTarget {
 		nflog("buf has insufficient size for error target %d", len(buf))
 		return nil, syserr.ErrInvalidArgument
@@ -332,7 +341,7 @@ func (*redirectTargetMaker) marshal(target target) []byte {
 	return marshal.Marshal(&xt)
 }
 
-func (*redirectTargetMaker) unmarshal(buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
+func (*redirectTargetMaker) unmarshal(stk *stack.Stack, buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
 	if len(buf) < linux.SizeOfXTRedirectTarget {
 		nflog("redirectTargetMaker: buf has insufficient size for redirect target %d", len(buf))
 		return nil, syserr.ErrInvalidArgument
@@ -413,7 +422,7 @@ func (*nfNATTargetMaker) marshal(target target) []byte {
 	return marshal.Marshal(&nt)
 }
 
-func (*nfNATTargetMaker) unmarshal(buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
+func (*nfNATTargetMaker) unmarshal(stk *stack.Stack, buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
 	if size := linux.SizeOfXTNATTargetV1; len(buf) < size {
 		nflog("nfNATTargetMaker: buf has insufficient size (%d) for nfNAT target (%d)", len(buf), size)
 		return nil, syserr.ErrInvalidArgument
@@ -481,7 +490,7 @@ func translateToStandardTarget(val int32, netProto tcpip.NetworkProtocolNumber) 
 
 // parseTarget parses a target from optVal. optVal should contain only the
 // target.
-func parseTarget(filter stack.IPHeaderFilter, optVal []byte, ipv6 bool) (stack.Target, *syserr.Error) {
+func parseTarget(stk *stack.Stack, filter stack.IPHeaderFilter, optVal []byte, ipv6 bool) (target, *syserr.Error) {
 	nflog("set entries: parsing target of size %d", len(optVal))
 	if len(optVal) < linux.SizeOfXTEntryTarget {
 		nflog("optVal has insufficient size for entry target %d", len(optVal))
@@ -492,7 +501,7 @@ func parseTarget(filter stack.IPHeaderFilter, optVal []byte, ipv6 bool) (stack.T
 	// XTEntryTarget again but with some added fields.
 	target.UnmarshalUnsafe(optVal)
 
-	return unmarshalTarget(target, filter, optVal)
+	return unmarshalTarget(stk, target, filter, optVal)
 }
 
 // JumpTarget implements stack.Target.
@@ -532,4 +541,219 @@ func htons(port uint16) uint16 {
 	buf := make([]byte, 2)
 	hostarch.ByteOrder.PutUint16(buf, port)
 	return binary.BigEndian.Uint16(buf)
+}
+
+// RejectTargetName is used to mark targets as reject targets.
+const RejectTargetName = "REJECT"
+
+// +stateify savable
+type rejectIPv4Target struct {
+	stack.RejectIPv4Target
+}
+
+func (rt *rejectIPv4Target) id() targetID {
+	return targetID{
+		name:            RejectTargetName,
+		networkProtocol: header.IPv4ProtocolNumber,
+	}
+}
+
+// +stateify savable
+type rejectIPv6Target struct {
+	stack.RejectIPv6Target
+}
+
+func (rt *rejectIPv6Target) id() targetID {
+	return targetID{
+		name:            RejectTargetName,
+		networkProtocol: header.IPv6ProtocolNumber,
+	}
+}
+
+// +stateify savable
+type rejectTargetMaker struct {
+	NetworkProtocol tcpip.NetworkProtocolNumber
+}
+
+func (rm *rejectTargetMaker) id() targetID {
+	return targetID{
+		name:            RejectTargetName,
+		networkProtocol: rm.NetworkProtocol,
+	}
+}
+
+func (rm *rejectTargetMaker) marshal(tgt target) []byte {
+	if rm.NetworkProtocol == header.IPv4ProtocolNumber {
+		rt := tgt.(*rejectIPv4Target)
+		size := bits.AlignUp(linux.SizeOfXTEntryTarget+linux.SizeOfIPTRejectInfo, 8)
+		xt := linux.XTEntryTarget{
+			TargetSize: uint16(size),
+		}
+		copy(xt.Name[:], RejectTargetName)
+
+		var with uint32
+		switch rt.RejectWith {
+		case stack.RejectIPv4WithICMPNetUnreachable:
+			with = linux.IPT_ICMP_NET_UNREACHABLE
+		case stack.RejectIPv4WithICMPHostUnreachable:
+			with = linux.IPT_ICMP_HOST_UNREACHABLE
+		case stack.RejectIPv4WithICMPPortUnreachable:
+			with = linux.IPT_ICMP_PORT_UNREACHABLE
+		case stack.RejectIPv4WithICMPNetProhibited:
+			with = linux.IPT_ICMP_NET_PROHIBITED
+		case stack.RejectIPv4WithICMPHostProhibited:
+			with = linux.IPT_ICMP_HOST_PROHIBITED
+		case stack.RejectIPv4WithICMPAdminProhibited:
+			with = linux.IPT_ICMP_ADMIN_PROHIBITED
+		case stack.RejectIPv4WithTCPReset:
+			with = linux.IPT_TCP_RESET
+		default:
+			panic(fmt.Sprintf("unknown reject option %v", rt.RejectWith))
+		}
+
+		info := linux.IPTRejectInfo{With: with}
+
+		buf := make([]byte, size)
+		bufRemain := xt.MarshalUnsafe(buf)
+		info.MarshalUnsafe(bufRemain)
+		return buf
+	} else {
+		rt := tgt.(*rejectIPv6Target)
+		size := bits.AlignUp(linux.SizeOfXTEntryTarget+linux.SizeOfIP6TRejectInfo, 8)
+		xt := linux.XTEntryTarget{
+			TargetSize: uint16(size),
+		}
+		copy(xt.Name[:], RejectTargetName)
+
+		var with uint32
+		switch rt.RejectWith {
+		case stack.RejectIPv6WithICMPNoRoute:
+			with = linux.IP6T_ICMP6_NO_ROUTE
+		case stack.RejectIPv6WithICMPAddrUnreachable:
+			with = linux.IP6T_ICMP6_ADDR_UNREACH
+		case stack.RejectIPv6WithICMPPortUnreachable:
+			with = linux.IP6T_ICMP6_PORT_UNREACH
+		case stack.RejectIPv6WithICMPAdminProhibited:
+			with = linux.IP6T_ICMP6_ADM_PROHIBITED
+		case stack.RejectIPv6WithTCPReset:
+			with = linux.IP6T_TCP_RESET
+		case stack.RejectIPv6WithICMPNotNeighbour:
+			with = linux.IP6T_ICMP6_NOT_NEIGHBOUR
+		case stack.RejectIPv6WithICMPPolicyFail:
+			with = linux.IP6T_ICMP6_POLICY_FAIL
+		case stack.RejectIPv6WithICMPRejectRoute:
+			with = linux.IP6T_ICMP6_REJECT_ROUTE
+		default:
+			panic(fmt.Sprintf("unknown reject option %v", rt.RejectWith))
+		}
+
+		info := linux.IP6TRejectInfo{With: with}
+
+		buf := make([]byte, size)
+		bufRemain := xt.MarshalUnsafe(buf)
+		info.MarshalUnsafe(bufRemain)
+		return buf
+	}
+}
+
+func (rm *rejectTargetMaker) unmarshal(stk *stack.Stack, buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
+	if rm.NetworkProtocol == header.IPv4ProtocolNumber {
+		if len(buf) < linux.SizeOfXTEntryTarget+linux.SizeOfIPTRejectInfo {
+			nflog("rejectTargetMaker: buf has insufficient size %d", len(buf))
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		var info linux.IPTRejectInfo
+		info.UnmarshalUnsafe(buf[linux.SizeOfXTEntryTarget:])
+
+		var rejectWith stack.RejectIPv4WithICMPType
+		switch info.With {
+		case linux.IPT_ICMP_NET_UNREACHABLE:
+			rejectWith = stack.RejectIPv4WithICMPNetUnreachable
+		case linux.IPT_ICMP_HOST_UNREACHABLE:
+			rejectWith = stack.RejectIPv4WithICMPHostUnreachable
+		case linux.IPT_ICMP_PORT_UNREACHABLE:
+			rejectWith = stack.RejectIPv4WithICMPPortUnreachable
+		case linux.IPT_ICMP_NET_PROHIBITED:
+			rejectWith = stack.RejectIPv4WithICMPNetProhibited
+		case linux.IPT_ICMP_HOST_PROHIBITED:
+			rejectWith = stack.RejectIPv4WithICMPHostProhibited
+		case linux.IPT_ICMP_ADMIN_PROHIBITED:
+			rejectWith = stack.RejectIPv4WithICMPAdminProhibited
+		case linux.IPT_TCP_RESET:
+			if filter.Protocol != header.TCPProtocolNumber {
+				nflog("rejectTargetMaker: TCP_RESET invalid for non-tcp")
+				return nil, syserr.ErrInvalidArgument
+			}
+			rejectWith = stack.RejectIPv4WithTCPReset
+		case linux.IPT_ICMP_ECHOREPLY:
+			nflog("rejectTargetMaker: ECHOREPLY no longer supported")
+			return nil, syserr.ErrInvalidArgument
+		default:
+			nflog("rejectTargetMaker: unknown reject type %d", info.With)
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		netProto := stk.NetworkProtocolInstance(filter.NetworkProtocol())
+		handler, ok := netProto.(stack.RejectIPv4WithHandler)
+		if !ok {
+			nflog("rejectTargetMaker: expected %T to implement stack.RejectIPv4WithHandler", netProto)
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		return &rejectIPv4Target{stack.RejectIPv4Target{
+			Handler:    handler,
+			RejectWith: rejectWith,
+		}}, nil
+	} else {
+		if len(buf) < linux.SizeOfXTEntryTarget+linux.SizeOfIP6TRejectInfo {
+			nflog("rejectTargetMaker: buf has insufficient size %d", len(buf))
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		var info linux.IP6TRejectInfo
+		info.UnmarshalUnsafe(buf[linux.SizeOfXTEntryTarget:])
+
+		var rejectWith stack.RejectIPv6WithICMPType
+		switch info.With {
+		case linux.IP6T_ICMP6_NO_ROUTE:
+			rejectWith = stack.RejectIPv6WithICMPNoRoute
+		case linux.IP6T_ICMP6_ADDR_UNREACH:
+			rejectWith = stack.RejectIPv6WithICMPAddrUnreachable
+		case linux.IP6T_ICMP6_PORT_UNREACH:
+			rejectWith = stack.RejectIPv6WithICMPPortUnreachable
+		case linux.IP6T_ICMP6_ADM_PROHIBITED:
+			rejectWith = stack.RejectIPv6WithICMPAdminProhibited
+		case linux.IP6T_TCP_RESET:
+			if filter.Protocol != header.TCPProtocolNumber {
+				nflog("rejectTargetMaker: TCP_RESET invalid for non-tcp")
+				return nil, syserr.ErrInvalidArgument
+			}
+			rejectWith = stack.RejectIPv6WithTCPReset
+		case linux.IP6T_ICMP6_ECHOREPLY:
+			nflog("rejectTargetMaker: ECHOREPLY no longer supported")
+			return nil, syserr.ErrInvalidArgument
+		case linux.IP6T_ICMP6_NOT_NEIGHBOUR:
+			rejectWith = stack.RejectIPv6WithICMPNotNeighbour
+		case linux.IP6T_ICMP6_POLICY_FAIL:
+			rejectWith = stack.RejectIPv6WithICMPPolicyFail
+		case linux.IP6T_ICMP6_REJECT_ROUTE:
+			rejectWith = stack.RejectIPv6WithICMPRejectRoute
+		default:
+			nflog("rejectTargetMaker: unknown reject type %d", info.With)
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		netProto := stk.NetworkProtocolInstance(filter.NetworkProtocol())
+		handler, ok := netProto.(stack.RejectIPv6WithHandler)
+		if !ok {
+			nflog("rejectTargetMaker: expected %T to implement stack.RejectIPv6WithHandler", netProto)
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		return &rejectIPv6Target{stack.RejectIPv6Target{
+			Handler:    handler,
+			RejectWith: rejectWith,
+		}}, nil
+	}
 }

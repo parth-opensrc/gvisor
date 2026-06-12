@@ -16,15 +16,18 @@
 
 #include <arpa/inet.h>
 #include <linux/capability.h>
+#include <linux/errqueue.h>
 #include <linux/netfilter/x_tables.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
 #include <sys/poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -34,11 +37,12 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
-#include "gmock/gmock.h"
-#include "gtest/gtest.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "gmock/gmock.h"
+#include "gtest/gtest.h"
 #include "test/util/file_descriptor.h"
 #include "test/util/linux_capability_util.h"
 #include "test/util/logging.h"
@@ -632,6 +636,1103 @@ INSTANTIATE_TEST_SUITE_P(
         SetSockOptRequiresCapNetAdminTest::ParamType>& info) {
       return info.param.test_name;
     });
+class AutoIptablesRule {
+ public:
+  AutoIptablesRule(bool ipv6, const std::string& table,
+                   const std::vector<std::string>& args)
+      : ipv6_(ipv6), table_(table), args_(args) {
+    std::vector<std::string> cmd = {"-t", table_, "-A"};
+    cmd.insert(cmd.end(), args_.begin(), args_.end());
+    success_ = RunCmd(cmd);
+    EXPECT_TRUE(success_) << "Failed to install iptables rule";
+  }
+
+  ~AutoIptablesRule() {
+    if (success_) {
+      std::vector<std::string> cmd = {"-t", table_, "-D"};
+      cmd.insert(cmd.end(), args_.begin(), args_.end());
+      EXPECT_TRUE(RunCmd(cmd)) << "Failed to clean up iptables rule";
+    }
+  }
+
+  bool Success() const { return success_; }
+
+ private:
+  bool RunCmd(const std::vector<std::string>& args) {
+    std::vector<std::string> paths;
+    if (ipv6_) {
+      paths = {"/usr/sbin/ip6tables-legacy", "/sbin/ip6tables-legacy",
+               "/usr/sbin/ip6tables", "/sbin/ip6tables"};
+    } else {
+      paths = {"/usr/sbin/iptables-legacy", "/sbin/iptables-legacy",
+               "/usr/sbin/iptables", "/sbin/iptables"};
+    }
+
+    for (const auto& path : paths) {
+      std::vector<std::string> full_args = {path};
+      full_args.insert(full_args.end(), args.begin(), args.end());
+      ExecveArray argv(full_args);
+      ExecveArray envv({"XTABLES_LOCKFILE=/tmp/xtables.lock"});
+      pid_t child;
+      int execve_errno = 0;
+      auto cleanup_or = ForkAndExec(path, argv, envv, &child, &execve_errno);
+      if (!cleanup_or.ok()) {
+        continue;
+      }
+      if (execve_errno != 0) {
+        continue;
+      }
+      int status;
+      if (waitpid(child, &status, 0) < 0) {
+        return false;
+      }
+      return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    return false;
+  }
+
+  bool ipv6_;
+  std::string table_;
+  std::vector<std::string> args_;
+  bool success_ = false;
+};
+
+struct TcpPseudoHdr {
+  uint32_t src_ip;
+  uint32_t dest_ip;
+  char zero;
+  char protocol;
+  uint16_t tcp_len;
+};
+
+uint16_t ComputeChecksum(uint16_t* buf, ssize_t buf_size) {
+  uint32_t total = 0;
+  for (unsigned int i = 0; i < buf_size - 1; i += 2) {
+    total += *buf;
+    buf++;
+  }
+  if (buf_size % 2) {
+    total += *(reinterpret_cast<unsigned char*>(buf));
+  }
+  while (total >> 16) {
+    uint16_t lower = total & 0xffff;
+    uint16_t upper = total >> 16;
+    total = lower + upper;
+  }
+  return ~total;
+}
+
+uint16_t TCPChecksum(struct iphdr iphdr, struct tcphdr tcphdr,
+                     const char* payload, ssize_t payload_len) {
+  struct TcpPseudoHdr phdr = {};
+  phdr.src_ip = iphdr.saddr;
+  phdr.dest_ip = iphdr.daddr;
+  phdr.zero = 0;
+  phdr.protocol = IPPROTO_TCP;
+  phdr.tcp_len = htons(sizeof(tcphdr) + payload_len);
+
+  ssize_t buf_size = sizeof(phdr) + sizeof(tcphdr) + payload_len;
+  std::vector<char> buf(buf_size);
+  memcpy(buf.data(), &phdr, sizeof(phdr));
+  memcpy(buf.data() + sizeof(phdr), &tcphdr, sizeof(tcphdr));
+  if (payload_len > 0) {
+    memcpy(buf.data() + sizeof(phdr) + sizeof(tcphdr), payload, payload_len);
+  }
+
+  return ComputeChecksum(reinterpret_cast<uint16_t*>(buf.data()), buf_size);
+}
+
+TEST(IPTablesReject, ICMPPortUnreachable) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  int port = 39999;
+
+  AutoIptablesRule rule(
+      /*ipv6=*/false, "filter",
+      {"INPUT", "-p", "udp", "--dport", std::to_string(port), "-j", "REJECT",
+       "--reject-with", "icmp-port-unreachable"});
+  ASSERT_TRUE(rule.Success());
+
+  int rx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+  ASSERT_THAT(rx_sock, SyscallSucceeds());
+  FileDescriptor rx_fd(rx_sock);
+
+  struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+  ASSERT_THAT(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),
+              SyscallSucceeds());
+
+  int tx_sock = socket(AF_INET, SOCK_DGRAM, 0);
+  ASSERT_THAT(tx_sock, SyscallSucceeds());
+  FileDescriptor tx_fd(tx_sock);
+
+  struct sockaddr_in dst = {};
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(port);
+  dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+  char send_buf[] = "test payload";
+  ASSERT_THAT(sendto(tx_sock, send_buf, sizeof(send_buf), 0,
+                     reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+              SyscallSucceedsWithValue(sizeof(send_buf)));
+
+  char recv_buf[512];
+  struct sockaddr_in src = {};
+  socklen_t src_len = sizeof(src);
+  ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                       reinterpret_cast<struct sockaddr*>(&src), &src_len);
+  ASSERT_THAT(n, SyscallSucceeds());
+
+  ASSERT_GE(
+      n, static_cast<ssize_t>(sizeof(struct iphdr) + sizeof(struct icmphdr)));
+  struct iphdr* ip = reinterpret_cast<struct iphdr*>(recv_buf);
+  struct icmphdr* icmp =
+      reinterpret_cast<struct icmphdr*>(recv_buf + ip->ihl * 4);
+  EXPECT_EQ(icmp->type, ICMP_DEST_UNREACH);
+  EXPECT_EQ(icmp->code, ICMP_PORT_UNREACH);
+
+  char* orig_payload = recv_buf + ip->ihl * 4 + sizeof(struct icmphdr);
+  struct iphdr* orig_ip = reinterpret_cast<struct iphdr*>(orig_payload);
+  ASSERT_GE(n, static_cast<ssize_t>(ip->ihl * 4 + sizeof(struct icmphdr) +
+                                    orig_ip->ihl * 4 + sizeof(struct udphdr)));
+  EXPECT_EQ(orig_ip->protocol, IPPROTO_UDP);
+  struct udphdr* orig_udp =
+      reinterpret_cast<struct udphdr*>(orig_payload + orig_ip->ihl * 4);
+  EXPECT_EQ(ntohs(orig_udp->dest), port);
+}
+
+TEST(IPTablesReject, TCPReset) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  int port = 39998;
+
+  AutoIptablesRule rule(
+      /*ipv6=*/false, "filter",
+      {"INPUT", "-p", "tcp", "--dport", std::to_string(port), "-j", "REJECT",
+       "--reject-with", "tcp-reset"});
+  ASSERT_TRUE(rule.Success());
+
+  int rx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
+  ASSERT_THAT(rx_sock, SyscallSucceeds());
+  FileDescriptor rx_fd(rx_sock);
+
+  struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+  ASSERT_THAT(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),
+              SyscallSucceeds());
+
+  // Send TCP SYN (ACK=0) to trigger RST,ACK.
+  {
+    int tx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    ASSERT_THAT(tx_sock, SyscallSucceeds());
+    FileDescriptor tx_fd(tx_sock);
+
+    struct iphdr ip = {};
+    ip.ihl = 5;
+    ip.version = 4;
+    ip.tos = 0;
+    ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct tcphdr));
+    ip.id = 0;
+    ip.frag_off = 0;
+    ip.ttl = 64;
+    ip.protocol = IPPROTO_TCP;
+    ip.saddr = htonl(INADDR_LOOPBACK);
+    ip.daddr = htonl(INADDR_LOOPBACK);
+
+    struct tcphdr tcp = {};
+    tcp.source = htons(54321);
+    tcp.dest = htons(port);
+    tcp.seq = htonl(12345);
+    tcp.ack_seq = 0;
+    tcp.doff = sizeof(struct tcphdr) / 4;
+    tcp.syn = 1;
+    tcp.ack = 0;
+    tcp.window = htons(1024);
+    tcp.check = TCPChecksum(ip, tcp, nullptr, 0);
+
+    char packet[sizeof(struct iphdr) + sizeof(struct tcphdr)];
+    memcpy(packet, &ip, sizeof(ip));
+    memcpy(packet + sizeof(ip), &tcp, sizeof(tcp));
+
+    struct sockaddr_in dst = {};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(port);
+    dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    ASSERT_THAT(sendto(tx_sock, packet, sizeof(packet), 0,
+                       reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+                SyscallSucceedsWithValue(sizeof(packet)));
+
+    char recv_buf[512];
+    struct sockaddr_in src = {};
+    socklen_t src_len = sizeof(src);
+    ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                         reinterpret_cast<struct sockaddr*>(&src), &src_len);
+    ASSERT_THAT(n, SyscallSucceeds());
+    ASSERT_GE(
+        n, static_cast<ssize_t>(sizeof(struct iphdr) + sizeof(struct tcphdr)));
+
+    struct iphdr* rx_ip = reinterpret_cast<struct iphdr*>(recv_buf);
+    struct tcphdr* rx_tcp =
+        reinterpret_cast<struct tcphdr*>(recv_buf + rx_ip->ihl * 4);
+
+    EXPECT_EQ(ntohs(rx_tcp->dest), 54321);
+    EXPECT_EQ(ntohs(rx_tcp->source), port);
+    EXPECT_TRUE(rx_tcp->rst);
+    EXPECT_TRUE(rx_tcp->ack);
+    EXPECT_EQ(ntohl(rx_tcp->ack_seq), 12346);
+  }
+
+  // Send TCP ACK (ACK=1) to trigger RST.
+  {
+    int tx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    ASSERT_THAT(tx_sock, SyscallSucceeds());
+    FileDescriptor tx_fd(tx_sock);
+
+    struct iphdr ip = {};
+    ip.ihl = 5;
+    ip.version = 4;
+    ip.tos = 0;
+    ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct tcphdr));
+    ip.id = 0;
+    ip.frag_off = 0;
+    ip.ttl = 64;
+    ip.protocol = IPPROTO_TCP;
+    ip.saddr = htonl(INADDR_LOOPBACK);
+    ip.daddr = htonl(INADDR_LOOPBACK);
+
+    struct tcphdr tcp = {};
+    tcp.source = htons(54322);
+    tcp.dest = htons(port);
+    tcp.seq = htonl(12345);
+    tcp.ack_seq = htonl(67890);
+    tcp.doff = sizeof(struct tcphdr) / 4;
+    tcp.syn = 0;
+    tcp.ack = 1;
+    tcp.window = htons(1024);
+    tcp.check = TCPChecksum(ip, tcp, nullptr, 0);
+
+    char packet[sizeof(struct iphdr) + sizeof(struct tcphdr)];
+    memcpy(packet, &ip, sizeof(ip));
+    memcpy(packet + sizeof(ip), &tcp, sizeof(tcp));
+
+    struct sockaddr_in dst = {};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(port);
+    dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    ASSERT_THAT(sendto(tx_sock, packet, sizeof(packet), 0,
+                       reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+                SyscallSucceedsWithValue(sizeof(packet)));
+
+    char recv_buf[512];
+    struct sockaddr_in src = {};
+    socklen_t src_len = sizeof(src);
+    ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                         reinterpret_cast<struct sockaddr*>(&src), &src_len);
+    ASSERT_THAT(n, SyscallSucceeds());
+    ASSERT_GE(
+        n, static_cast<ssize_t>(sizeof(struct iphdr) + sizeof(struct tcphdr)));
+
+    struct iphdr* rx_ip = reinterpret_cast<struct iphdr*>(recv_buf);
+    struct tcphdr* rx_tcp =
+        reinterpret_cast<struct tcphdr*>(recv_buf + rx_ip->ihl * 4);
+
+    EXPECT_EQ(ntohs(rx_tcp->dest), 54322);
+    EXPECT_EQ(ntohs(rx_tcp->source), port);
+    EXPECT_TRUE(rx_tcp->rst);
+    EXPECT_EQ(ntohl(rx_tcp->seq), 67890);
+  }
+}
+
+TEST(IPTablesReject, FirstFragmentReject) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  int port = 39996;
+
+  AutoIptablesRule rule(
+      /*ipv6=*/false, "filter",
+      {"INPUT", "-p", "tcp", "--dport", std::to_string(port), "-j", "REJECT",
+       "--reject-with", "tcp-reset"});
+  ASSERT_TRUE(rule.Success());
+
+  int rx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
+  ASSERT_THAT(rx_sock, SyscallSucceeds());
+  FileDescriptor rx_fd(rx_sock);
+
+  struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
+  ASSERT_THAT(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),
+              SyscallSucceeds());
+
+  int tx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+  ASSERT_THAT(tx_sock, SyscallSucceeds());
+  FileDescriptor tx_fd(tx_sock);
+
+  struct iphdr ip = {};
+  ip.ihl = 5;
+  ip.version = 4;
+  ip.tos = 0;
+  ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct tcphdr));
+  ip.id = 0;
+  ip.frag_off = htons(IP_MF);  // Offset = 0, More fragments = 1
+  ip.ttl = 64;
+  ip.protocol = IPPROTO_TCP;
+  ip.saddr = htonl(INADDR_LOOPBACK);
+  ip.daddr = htonl(INADDR_LOOPBACK);
+
+  struct tcphdr tcp = {};
+  tcp.source = htons(54321);
+  tcp.dest = htons(port);
+  tcp.seq = htonl(12345);
+  tcp.ack_seq = 0;
+  tcp.doff = sizeof(struct tcphdr) / 4;
+  tcp.syn = 1;
+  tcp.ack = 0;
+  tcp.window = htons(1024);
+  tcp.check = TCPChecksum(ip, tcp, nullptr, 0);
+
+  char packet[sizeof(struct iphdr) + sizeof(struct tcphdr)];
+  memcpy(packet, &ip, sizeof(ip));
+  memcpy(packet + sizeof(ip), &tcp, sizeof(tcp));
+
+  struct sockaddr_in dst = {};
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(port);
+  dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+  ASSERT_THAT(sendto(tx_sock, packet, sizeof(packet), 0,
+                     reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+              SyscallSucceedsWithValue(sizeof(packet)));
+
+  char recv_buf[512];
+  struct sockaddr_in src = {};
+  socklen_t src_len = sizeof(src);
+  ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                       reinterpret_cast<struct sockaddr*>(&src), &src_len);
+  ASSERT_THAT(n, SyscallSucceeds());
+  ASSERT_GE(n,
+            static_cast<ssize_t>(sizeof(struct iphdr) + sizeof(struct tcphdr)));
+
+  struct iphdr* rx_ip = reinterpret_cast<struct iphdr*>(recv_buf);
+  struct tcphdr* rx_tcp =
+      reinterpret_cast<struct tcphdr*>(recv_buf + rx_ip->ihl * 4);
+
+  EXPECT_EQ(ntohs(rx_tcp->dest), 54321);
+  EXPECT_EQ(ntohs(rx_tcp->source), port);
+  EXPECT_TRUE(rx_tcp->rst);
+  EXPECT_TRUE(rx_tcp->ack);
+  EXPECT_EQ(ntohl(rx_tcp->ack_seq), 12346);
+}
+
+TEST(IPTablesReject, SubsequentFragmentNoReject) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  int port = 39996;
+
+  AutoIptablesRule rule(
+      /*ipv6=*/false, "filter",
+      {"INPUT", "-p", "tcp", "--dport", std::to_string(port), "-j", "REJECT",
+       "--reject-with", "tcp-reset"});
+  ASSERT_TRUE(rule.Success());
+
+  int rx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
+  ASSERT_THAT(rx_sock, SyscallSucceeds());
+  FileDescriptor rx_fd(rx_sock);
+
+  struct timeval tv = {.tv_sec = 0, .tv_usec = 500000};
+  ASSERT_THAT(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),
+              SyscallSucceeds());
+
+  int tx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+  ASSERT_THAT(tx_sock, SyscallSucceeds());
+  FileDescriptor tx_fd(tx_sock);
+
+  struct iphdr ip = {};
+  ip.ihl = 5;
+  ip.version = 4;
+  ip.tos = 0;
+  ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct tcphdr));
+  ip.id = 0;
+  ip.frag_off = htons(8);  // Offset = 64 bytes (8 * 8), More fragments = 0
+  ip.ttl = 64;
+  ip.protocol = IPPROTO_TCP;
+  ip.saddr = htonl(INADDR_LOOPBACK);
+  ip.daddr = htonl(INADDR_LOOPBACK);
+
+  struct tcphdr tcp = {};
+  tcp.source = htons(54321);
+  tcp.dest = htons(port);
+  tcp.seq = htonl(12345);
+  tcp.ack_seq = 0;
+  tcp.doff = sizeof(struct tcphdr) / 4;
+  tcp.syn = 1;
+  tcp.ack = 0;
+  tcp.window = htons(1024);
+  tcp.check = TCPChecksum(ip, tcp, nullptr, 0);
+
+  char packet[sizeof(struct iphdr) + sizeof(struct tcphdr)];
+  memcpy(packet, &ip, sizeof(ip));
+  memcpy(packet + sizeof(ip), &tcp, sizeof(tcp));
+
+  struct sockaddr_in dst = {};
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(port);
+  dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+  ASSERT_THAT(sendto(tx_sock, packet, sizeof(packet), 0,
+                     reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+              SyscallSucceedsWithValue(sizeof(packet)));
+
+  char recv_buf[512];
+  struct sockaddr_in src = {};
+  socklen_t src_len = sizeof(src);
+  ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                       reinterpret_cast<struct sockaddr*>(&src), &src_len);
+  EXPECT_TRUE(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+      << "Expected timeout for subsequent fragment, but received packet: " << n
+      << " bytes, errno: " << errno;
+}
+
+TEST(IPTablesReject, InvalidChecksumNoReject) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  int port = 39995;
+
+  AutoIptablesRule rule(
+      /*ipv6=*/false, "filter",
+      {"INPUT", "-p", "tcp", "--dport", std::to_string(port), "-j", "REJECT",
+       "--reject-with", "tcp-reset"});
+  ASSERT_TRUE(rule.Success());
+
+  int rx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
+  ASSERT_THAT(rx_sock, SyscallSucceeds());
+  FileDescriptor rx_fd(rx_sock);
+
+  struct timeval tv = {.tv_sec = 0, .tv_usec = 500000};
+  ASSERT_THAT(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),
+              SyscallSucceeds());
+
+  int tx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+  ASSERT_THAT(tx_sock, SyscallSucceeds());
+  FileDescriptor tx_fd(tx_sock);
+
+  struct iphdr ip = {};
+  ip.ihl = 5;
+  ip.version = 4;
+  ip.tos = 0;
+  ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct tcphdr));
+  ip.id = 0;
+  ip.frag_off = 0;
+  ip.ttl = 64;
+  ip.protocol = IPPROTO_TCP;
+  ip.saddr = htonl(INADDR_LOOPBACK);
+  ip.daddr = htonl(INADDR_LOOPBACK);
+
+  struct tcphdr tcp = {};
+  tcp.source = htons(54321);
+  tcp.dest = htons(port);
+  tcp.seq = htonl(12345);
+  tcp.ack_seq = 0;
+  tcp.doff = sizeof(struct tcphdr) / 4;
+  tcp.syn = 1;
+  tcp.ack = 0;
+  tcp.window = htons(1024);
+  // Set invalid checksum (do NOT compute actual checksum)
+  tcp.check = 0x1234;
+
+  char packet[sizeof(struct iphdr) + sizeof(struct tcphdr)];
+  memcpy(packet, &ip, sizeof(ip));
+  memcpy(packet + sizeof(ip), &tcp, sizeof(tcp));
+
+  struct sockaddr_in dst = {};
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(port);
+  dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+  ASSERT_THAT(sendto(tx_sock, packet, sizeof(packet), 0,
+                     reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+              SyscallSucceedsWithValue(sizeof(packet)));
+
+  char recv_buf[512];
+  struct sockaddr_in src = {};
+  socklen_t src_len = sizeof(src);
+  ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                       reinterpret_cast<struct sockaddr*>(&src), &src_len);
+  EXPECT_TRUE(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+      << "Expected timeout for invalid checksum, but received packet: " << n
+      << " bytes, errno: " << errno;
+}
+
+TEST(IPTablesReject, PingPongPrevention) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  int port_tcp = 39997;
+
+  // 1. TCP RST Loop Prevention.
+  {
+    AutoIptablesRule rule1(
+        /*ipv6=*/false, "filter",
+        {"INPUT", "-p", "tcp", "--dport", std::to_string(port_tcp), "-j",
+         "REJECT", "--reject-with", "tcp-reset"});
+    ASSERT_TRUE(rule1.Success());
+
+    int rx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
+    ASSERT_THAT(rx_sock, SyscallSucceeds());
+    FileDescriptor rx_fd(rx_sock);
+
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 500000};
+    ASSERT_THAT(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),
+                SyscallSucceeds());
+
+    int tx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    ASSERT_THAT(tx_sock, SyscallSucceeds());
+    FileDescriptor tx_fd(tx_sock);
+
+    struct iphdr ip = {};
+    ip.ihl = 5;
+    ip.version = 4;
+    ip.tos = 0;
+    ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct tcphdr));
+    ip.id = 0;
+    ip.frag_off = 0;
+    ip.ttl = 64;
+    ip.protocol = IPPROTO_TCP;
+    ip.saddr = htonl(INADDR_LOOPBACK);
+    ip.daddr = htonl(INADDR_LOOPBACK);
+
+    struct tcphdr tcp = {};
+    tcp.source = htons(54323);
+    tcp.dest = htons(port_tcp);
+    tcp.seq = htonl(12345);
+    tcp.ack_seq = 0;
+    tcp.doff = sizeof(struct tcphdr) / 4;
+    tcp.rst = 1;
+    tcp.window = htons(1024);
+    tcp.check = TCPChecksum(ip, tcp, nullptr, 0);
+
+    char packet[sizeof(struct iphdr) + sizeof(struct tcphdr)];
+    memcpy(packet, &ip, sizeof(ip));
+    memcpy(packet + sizeof(ip), &tcp, sizeof(tcp));
+
+    struct sockaddr_in dst = {};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(port_tcp);
+    dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    ASSERT_THAT(sendto(tx_sock, packet, sizeof(packet), 0,
+                       reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+                SyscallSucceedsWithValue(sizeof(packet)));
+
+    char recv_buf[512];
+    struct sockaddr_in src = {};
+    socklen_t src_len = sizeof(src);
+    ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                         reinterpret_cast<struct sockaddr*>(&src), &src_len);
+    EXPECT_TRUE(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        << "Expected timeout, but received packet: " << n
+        << " bytes, errno: " << errno;
+  }
+
+  // 2. ICMP Destination Unreachable Prevention.
+  {
+    AutoIptablesRule rule2(
+        /*ipv6=*/false, "filter",
+        {"INPUT", "-p", "icmp", "--icmp-type", "destination-unreachable", "-j",
+         "REJECT", "--reject-with", "icmp-port-unreachable"});
+    ASSERT_TRUE(rule2.Success());
+
+    int rx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    ASSERT_THAT(rx_sock, SyscallSucceeds());
+    FileDescriptor rx_fd(rx_sock);
+
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 500000};
+    ASSERT_THAT(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),
+                SyscallSucceeds());
+
+    int tx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    ASSERT_THAT(tx_sock, SyscallSucceeds());
+    FileDescriptor tx_fd(tx_sock);
+
+    struct iphdr ip = {};
+    ip.ihl = 5;
+    ip.version = 4;
+    ip.tos = 0;
+    ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct icmphdr));
+    ip.id = 0;
+    ip.frag_off = 0;
+    ip.ttl = 64;
+    ip.protocol = IPPROTO_ICMP;
+    ip.saddr = htonl(INADDR_LOOPBACK);
+    ip.daddr = htonl(INADDR_LOOPBACK);
+
+    struct icmphdr icmp = {};
+    icmp.type = ICMP_DEST_UNREACH;
+    icmp.code = ICMP_PORT_UNREACH;
+    icmp.checksum = ICMPChecksum(icmp, nullptr, 0);
+
+    char packet[sizeof(struct iphdr) + sizeof(struct icmphdr)];
+    memcpy(packet, &ip, sizeof(ip));
+    memcpy(packet + sizeof(ip), &icmp, sizeof(icmp));
+
+    struct sockaddr_in dst = {};
+    dst.sin_family = AF_INET;
+    dst.sin_port = 0;
+    dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    ASSERT_THAT(sendto(tx_sock, packet, sizeof(packet), 0,
+                       reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+                SyscallSucceedsWithValue(sizeof(packet)));
+
+    char recv_buf[512];
+    struct sockaddr_in src = {};
+    socklen_t src_len = sizeof(src);
+    ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                         reinterpret_cast<struct sockaddr*>(&src), &src_len);
+    EXPECT_TRUE(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        << "Expected timeout, but received packet: " << n
+        << " bytes, errno: " << errno;
+  }
+
+  // 3. Normal ICMP Echo Request.
+  {
+    AutoIptablesRule rule3(
+        /*ipv6=*/false, "filter",
+        {"INPUT", "-p", "icmp", "--icmp-type", "echo-request", "-j", "REJECT",
+         "--reject-with", "icmp-port-unreachable"});
+    ASSERT_TRUE(rule3.Success());
+
+    int rx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    ASSERT_THAT(rx_sock, SyscallSucceeds());
+    FileDescriptor rx_fd(rx_sock);
+
+    struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+    ASSERT_THAT(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),
+                SyscallSucceeds());
+
+    int tx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    ASSERT_THAT(tx_sock, SyscallSucceeds());
+    FileDescriptor tx_fd(tx_sock);
+
+    struct iphdr ip = {};
+    ip.ihl = 5;
+    ip.version = 4;
+    ip.tos = 0;
+    ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct icmphdr));
+    ip.id = 0;
+    ip.frag_off = 0;
+    ip.ttl = 64;
+    ip.protocol = IPPROTO_ICMP;
+    ip.saddr = htonl(INADDR_LOOPBACK);
+    ip.daddr = htonl(INADDR_LOOPBACK);
+
+    struct icmphdr icmp = {};
+    icmp.type = ICMP_ECHO;
+    icmp.code = 0;
+    icmp.checksum = ICMPChecksum(icmp, nullptr, 0);
+
+    char packet[sizeof(struct iphdr) + sizeof(struct icmphdr)];
+    memcpy(packet, &ip, sizeof(ip));
+    memcpy(packet + sizeof(ip), &icmp, sizeof(icmp));
+
+    struct sockaddr_in dst = {};
+    dst.sin_family = AF_INET;
+    dst.sin_port = 0;
+    dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    ASSERT_THAT(sendto(tx_sock, packet, sizeof(packet), 0,
+                       reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+                SyscallSucceedsWithValue(sizeof(packet)));
+
+    char recv_buf[512];
+    struct sockaddr_in src = {};
+    socklen_t src_len = sizeof(src);
+    ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                         reinterpret_cast<struct sockaddr*>(&src), &src_len);
+    bool got_unreach = false;
+    for (int i = 0; i < 5; i++) {
+      if (n < 0) break;
+      struct iphdr* rx_ip = reinterpret_cast<struct iphdr*>(recv_buf);
+      struct icmphdr* rx_icmp =
+          reinterpret_cast<struct icmphdr*>(recv_buf + rx_ip->ihl * 4);
+      if (rx_icmp->type == ICMP_DEST_UNREACH) {
+        EXPECT_EQ(rx_icmp->code, ICMP_PORT_UNREACH);
+        got_unreach = true;
+        break;
+      }
+      n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                   reinterpret_cast<struct sockaddr*>(&src), &src_len);
+    }
+    EXPECT_TRUE(got_unreach);
+  }
+}
+
+bool RunIptablesCmd(bool ipv6, const std::vector<std::string>& args) {
+  std::vector<std::string> paths;
+  if (ipv6) {
+    paths = {"/usr/sbin/ip6tables-legacy", "/sbin/ip6tables-legacy",
+             "/usr/sbin/ip6tables", "/sbin/ip6tables"};
+  } else {
+    paths = {"/usr/sbin/iptables-legacy", "/sbin/iptables-legacy",
+             "/usr/sbin/iptables", "/sbin/iptables"};
+  }
+
+  for (const auto& path : paths) {
+    std::vector<std::string> full_args = {path};
+    full_args.insert(full_args.end(), args.begin(), args.end());
+    ExecveArray argv(full_args);
+    ExecveArray envv({"XTABLES_LOCKFILE=/tmp/xtables.lock"});
+    pid_t child;
+    int execve_errno = 0;
+    auto cleanup_or = ForkAndExec(path, argv, envv, &child, &execve_errno);
+    if (!cleanup_or.ok()) {
+      continue;
+    }
+    if (execve_errno != 0) {
+      continue;
+    }
+    int status;
+    if (waitpid(child, &status, 0) < 0) {
+      return false;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+  }
+  return false;
+}
+
+struct ICMPVariantParam {
+  std::string reject_with;
+  uint8_t expected_type;
+  uint8_t expected_code;
+};
+
+TEST(IPTablesReject, ICMPVariants) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  std::vector<ICMPVariantParam> params = {
+      {"icmp-net-unreachable", ICMP_DEST_UNREACH, ICMP_NET_UNREACH},
+      {"icmp-host-unreachable", ICMP_DEST_UNREACH, ICMP_HOST_UNREACH},
+      {"icmp-net-prohibited", ICMP_DEST_UNREACH, ICMP_NET_ANO},
+      {"icmp-host-prohibited", ICMP_DEST_UNREACH, ICMP_HOST_ANO},
+      {"icmp-admin-prohibited", ICMP_DEST_UNREACH, ICMP_PKT_FILTERED},
+  };
+
+  int base_port = 39980;
+  for (size_t i = 0; i < params.size(); ++i) {
+    int port = base_port + i;
+    AutoIptablesRule rule(
+        /*ipv6=*/false, "filter",
+        {"INPUT", "-p", "udp", "--dport", std::to_string(port), "-j", "REJECT",
+         "--reject-with", params[i].reject_with});
+    ASSERT_TRUE(rule.Success());
+
+    int rx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    ASSERT_THAT(rx_sock, SyscallSucceeds());
+    FileDescriptor rx_fd(rx_sock);
+
+    struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+    ASSERT_THAT(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),
+                SyscallSucceeds());
+
+    int tx_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_THAT(tx_sock, SyscallSucceeds());
+    FileDescriptor tx_fd(tx_sock);
+
+    struct sockaddr_in dst = {};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(port);
+    dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    char send_buf[] = "test payload";
+    ASSERT_THAT(sendto(tx_sock, send_buf, sizeof(send_buf), 0,
+                       reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+                SyscallSucceedsWithValue(sizeof(send_buf)));
+
+    char recv_buf[512];
+    struct sockaddr_in src = {};
+    socklen_t src_len = sizeof(src);
+    ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                         reinterpret_cast<struct sockaddr*>(&src), &src_len);
+    ASSERT_THAT(n, SyscallSucceeds());
+
+    ASSERT_GE(
+        n, static_cast<ssize_t>(sizeof(struct iphdr) + sizeof(struct icmphdr)));
+    struct iphdr* ip = reinterpret_cast<struct iphdr*>(recv_buf);
+    struct icmphdr* icmp =
+        reinterpret_cast<struct icmphdr*>(recv_buf + ip->ihl * 4);
+    EXPECT_EQ(icmp->type, params[i].expected_type)
+        << "Failed for " << params[i].reject_with;
+    EXPECT_EQ(icmp->code, params[i].expected_code)
+        << "Failed for " << params[i].reject_with;
+  }
+}
+
+TEST(IPTablesReject, BroadcastMulticastNoReject) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  int port = 39979;
+
+  AutoIptablesRule rule(
+      /*ipv6=*/false, "filter",
+      {"INPUT", "-p", "udp", "--dport", std::to_string(port), "-j", "REJECT",
+       "--reject-with", "icmp-port-unreachable"});
+  ASSERT_TRUE(rule.Success());
+
+  int rx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+  ASSERT_THAT(rx_sock, SyscallSucceeds());
+  FileDescriptor rx_fd(rx_sock);
+
+  struct timeval tv = {.tv_sec = 0, .tv_usec = 500000};
+  ASSERT_THAT(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),
+              SyscallSucceeds());
+
+  int tx_sock = socket(AF_INET, SOCK_DGRAM, 0);
+  ASSERT_THAT(tx_sock, SyscallSucceeds());
+  FileDescriptor tx_fd(tx_sock);
+
+  int on = 1;
+  ASSERT_THAT(setsockopt(tx_sock, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on)),
+              SyscallSucceeds());
+
+  // 1. Send to Broadcast.
+  {
+    struct sockaddr_in dst = {};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(port);
+    dst.sin_addr.s_addr = htonl(INADDR_BROADCAST);  // 255.255.255.255
+
+    char send_buf[] = "test payload";
+    ssize_t res = sendto(tx_sock, send_buf, sizeof(send_buf), 0,
+                         reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst));
+    if (res >= 0) {
+      char recv_buf[512];
+      struct sockaddr_in src = {};
+      socklen_t src_len = sizeof(src);
+      ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                           reinterpret_cast<struct sockaddr*>(&src), &src_len);
+      EXPECT_TRUE(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+          << "Expected timeout for broadcast, but received packet: " << n
+          << " bytes, errno: " << errno;
+    }
+  }
+
+  // 2. Send to Multicast.
+  {
+    struct sockaddr_in dst = {};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(port);
+    dst.sin_addr.s_addr = inet_addr("224.0.0.1");
+
+    char send_buf[] = "test payload";
+    ssize_t res = sendto(tx_sock, send_buf, sizeof(send_buf), 0,
+                         reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst));
+    if (res >= 0) {
+      char recv_buf[512];
+      struct sockaddr_in src = {};
+      socklen_t src_len = sizeof(src);
+      ssize_t n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                           reinterpret_cast<struct sockaddr*>(&src), &src_len);
+      EXPECT_TRUE(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+          << "Expected timeout for multicast, but received packet: " << n
+          << " bytes, errno: " << errno;
+    }
+  }
+}
+
+TEST(IPTablesReject, ManipulationRequiresCapabilities) {
+  EXPECT_THAT(InForkedProcess([]() {
+                TEST_CHECK_SUCCESS(syscall(SYS_unshare, CLONE_NEWUSER));
+                bool res = RunIptablesCmd(
+                    /*ipv6=*/false,
+                    {"-t", "filter", "-A", "INPUT", "-p", "tcp", "--dport",
+                     "39999", "-j", "REJECT", "--reject-with", "tcp-reset"});
+                TEST_CHECK(!res);
+              }),
+              IsPosixErrorOkAndHolds(0));
+}
+
+TEST(IPTablesReject, InvalidHooks) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  EXPECT_FALSE(RunIptablesCmd(
+      /*ipv6=*/false,
+      {"-t", "mangle", "-A", "PREROUTING", "-p", "tcp", "--dport", "39999",
+       "-j", "REJECT", "--reject-with", "tcp-reset"}));
+
+  EXPECT_FALSE(RunIptablesCmd(
+      /*ipv6=*/false,
+      {"-t", "mangle", "-A", "POSTROUTING", "-p", "tcp", "--dport", "39999",
+       "-j", "REJECT", "--reject-with", "tcp-reset"}));
+}
+
+TEST(IPTablesReject, RecvErrorPortUnreachable) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  int port = 39978;
+
+  AutoIptablesRule rule(
+      /*ipv6=*/false, "filter",
+      {"INPUT", "-p", "udp", "--dport", std::to_string(port), "-j", "REJECT",
+       "--reject-with", "icmp-port-unreachable"});
+  ASSERT_TRUE(rule.Success());
+
+  int tx_sock = socket(AF_INET, SOCK_DGRAM, 0);
+  ASSERT_THAT(tx_sock, SyscallSucceeds());
+  FileDescriptor tx_fd(tx_sock);
+
+  int v = 1;
+  ASSERT_THAT(setsockopt(tx_sock, SOL_IP, IP_RECVERR, &v, sizeof(v)),
+              SyscallSucceeds());
+
+  struct sockaddr_in dst = {};
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(port);
+  dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+  char send_buf[] = "test payload";
+  ASSERT_THAT(sendto(tx_sock, send_buf, sizeof(send_buf), 0,
+                     reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+              SyscallSucceedsWithValue(sizeof(send_buf)));
+
+  char got[512];
+  struct iovec iov;
+  iov.iov_base = reinterpret_cast<void*>(got);
+  iov.iov_len = sizeof(got);
+
+  size_t control_buf_len =
+      CMSG_SPACE(sizeof(sock_extended_err) + sizeof(struct sockaddr_in));
+  std::vector<char> control_buf(control_buf_len);
+  struct sockaddr_in remote = {};
+  struct msghdr msg = {};
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_flags = 0;
+  msg.msg_control = control_buf.data();
+  msg.msg_controllen = control_buf_len;
+  msg.msg_name = reinterpret_cast<void*>(&remote);
+  msg.msg_namelen = sizeof(remote);
+
+  struct pollfd pfd = {.fd = tx_sock, .events = POLLIN};
+  int ready = poll(&pfd, 1, 1000);
+  ASSERT_TRUE(ready > 0 && (pfd.revents & POLLERR));
+
+  ASSERT_THAT(recvmsg(tx_sock, &msg, MSG_ERRQUEUE),
+              SyscallSucceedsWithValue(sizeof(send_buf)));
+
+  EXPECT_EQ(memcmp(got, send_buf, sizeof(send_buf)), 0);
+  EXPECT_NE(msg.msg_flags & MSG_ERRQUEUE, 0);
+
+  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+  ASSERT_NE(cmsg, nullptr);
+  EXPECT_EQ(cmsg->cmsg_level, SOL_IP);
+  EXPECT_EQ(cmsg->cmsg_type, IP_RECVERR);
+
+  struct sock_extended_err* serr =
+      reinterpret_cast<struct sock_extended_err*>(CMSG_DATA(cmsg));
+  EXPECT_EQ(serr->ee_origin, SO_EE_ORIGIN_ICMP);
+  EXPECT_EQ(serr->ee_type, ICMP_DEST_UNREACH);
+  EXPECT_EQ(serr->ee_code, ICMP_PORT_UNREACH);
+}
+
+TEST(IPTablesReject, OddLengthPayloadChecksum) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  AutoIptablesRule rule(
+      /*ipv6=*/false, "filter",
+      {"INPUT", "-p", "icmp", "--icmp-type", "echo-request", "-j", "REJECT",
+       "--reject-with", "icmp-port-unreachable"});
+  ASSERT_TRUE(rule.Success());
+
+  int rx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+  ASSERT_THAT(rx_sock, SyscallSucceeds());
+  FileDescriptor rx_fd(rx_sock);
+
+  struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+  ASSERT_THAT(setsockopt(rx_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),
+              SyscallSucceeds());
+
+  int tx_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+  ASSERT_THAT(tx_sock, SyscallSucceeds());
+  FileDescriptor tx_fd(tx_sock);
+
+  struct iphdr ip = {};
+  ip.ihl = 5;
+  ip.version = 4;
+  ip.tos = 0;
+  ip.tot_len = htons(sizeof(struct iphdr) + sizeof(struct icmphdr) + 1);
+  ip.id = 0;
+  ip.frag_off = 0;
+  ip.ttl = 64;
+  ip.protocol = IPPROTO_ICMP;
+  ip.saddr = htonl(INADDR_LOOPBACK);
+  ip.daddr = htonl(INADDR_LOOPBACK);
+
+  struct icmphdr icmp = {};
+  icmp.type = ICMP_ECHO;
+  icmp.code = 0;
+
+  char icmp_payload[sizeof(struct icmphdr) + 1] = {};
+  memcpy(icmp_payload, &icmp, sizeof(icmp));
+  icmp_payload[sizeof(struct icmphdr)] = 'A';
+
+  struct icmphdr* temp_icmp = reinterpret_cast<struct icmphdr*>(icmp_payload);
+  temp_icmp->checksum =
+      ICMPChecksum(*temp_icmp, icmp_payload + sizeof(struct icmphdr), 1);
+
+  char packet[sizeof(struct iphdr) + sizeof(struct icmphdr) + 1];
+  memcpy(packet, &ip, sizeof(ip));
+  memcpy(packet + sizeof(ip), icmp_payload, sizeof(icmp_payload));
+
+  struct sockaddr_in dst = {};
+  dst.sin_family = AF_INET;
+  dst.sin_port = 0;
+  dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+  ASSERT_THAT(sendto(tx_sock, packet, sizeof(packet), 0,
+                     reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst)),
+              SyscallSucceedsWithValue(sizeof(packet)));
+
+  char recv_buf[512];
+  struct sockaddr_in src = {};
+  socklen_t src_len = sizeof(src);
+  ssize_t n = 0;
+  bool got_unreach = false;
+  for (int i = 0; i < 5; i++) {
+    n = recvfrom(rx_sock, recv_buf, sizeof(recv_buf), 0,
+                 reinterpret_cast<struct sockaddr*>(&src), &src_len);
+    if (n < 0) {
+      break;
+    }
+    if (n <
+        static_cast<ssize_t>(sizeof(struct iphdr) + sizeof(struct icmphdr))) {
+      continue;
+    }
+    struct iphdr* rx_ip = reinterpret_cast<struct iphdr*>(recv_buf);
+    struct icmphdr* rx_icmp =
+        reinterpret_cast<struct icmphdr*>(recv_buf + rx_ip->ihl * 4);
+    if (rx_icmp->type == ICMP_DEST_UNREACH &&
+        rx_icmp->code == ICMP_PORT_UNREACH) {
+      got_unreach = true;
+
+      uint16_t received_checksum = rx_icmp->checksum;
+      rx_icmp->checksum = 0;
+      uint16_t computed_checksum = ComputeChecksum(
+          reinterpret_cast<uint16_t*>(rx_icmp), n - rx_ip->ihl * 4);
+      EXPECT_EQ(received_checksum, computed_checksum);
+      break;
+    }
+  }
+  EXPECT_TRUE(got_unreach);
+}
+
 }  // namespace
 
 }  // namespace testing

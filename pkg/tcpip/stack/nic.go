@@ -772,7 +772,7 @@ func (n *nic) DeliverNetworkPacket(protocol tcpip.NetworkProtocolNumber, pkt *Pa
 		return
 	}
 
-	pkt.RXChecksumValidated = n.NetworkLinkEndpoint.Capabilities()&CapabilityRXChecksumOffload != 0
+	pkt.RXChecksumValidated = (n.NetworkLinkEndpoint.Capabilities()&CapabilityRXChecksumOffload != 0) && !pkt.FromRawSocket
 
 	if n.deliverLinkPackets {
 		n.DeliverLinkPacket(protocol, pkt)

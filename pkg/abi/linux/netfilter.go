@@ -844,3 +844,89 @@ const SizeOfXTMultiport = 2 + (XT_MULTI_PORTS * 2)
 
 // SizeOfXTMultiportV1 is the size of XTMultiportV1 (in bytes).
 const SizeOfXTMultiportV1 = SizeOfXTMultiport + XT_MULTI_PORTS + 1
+
+// Reject types for IPTables Reject target.
+// Derived from include/uapi/linux/netfilter_ipv4/ipt_REJECT.h.
+const (
+	IPT_ICMP_NET_UNREACHABLE  = 0
+	IPT_ICMP_HOST_UNREACHABLE = 1
+	IPT_ICMP_PROT_UNREACHABLE = 2
+	IPT_ICMP_PORT_UNREACHABLE = 3
+	IPT_ICMP_ECHOREPLY        = 4
+	IPT_ICMP_NET_PROHIBITED   = 5
+	IPT_ICMP_HOST_PROHIBITED  = 6
+	IPT_TCP_RESET             = 7
+	IPT_ICMP_ADMIN_PROHIBITED = 8
+)
+
+// IPTRejectInfo corresponds to struct ipt_reject_info
+// in include/uapi/linux/netfilter_ipv4/ipt_REJECT.h.
+//
+// +marshal
+type IPTRejectInfo struct {
+	_    structs.HostLayout
+	With uint32 // reject type
+}
+
+// SizeOfIPTRejectInfo is the size of an IPTRejectInfo.
+const SizeOfIPTRejectInfo = 4
+
+// Reject types for IP6Tables Reject target.
+// Derived from include/uapi/linux/netfilter_ipv6/ip6t_REJECT.h.
+const (
+	IP6T_ICMP6_NO_ROUTE       = 0
+	IP6T_ICMP6_ADM_PROHIBITED = 1
+	IP6T_ICMP6_NOT_NEIGHBOUR  = 2
+	IP6T_ICMP6_ADDR_UNREACH   = 3
+	IP6T_ICMP6_PORT_UNREACH   = 4
+	IP6T_ICMP6_ECHOREPLY      = 5
+	IP6T_TCP_RESET            = 6
+	IP6T_ICMP6_POLICY_FAIL    = 7
+	IP6T_ICMP6_REJECT_ROUTE   = 8
+)
+
+// IP6TRejectInfo corresponds to struct ip6t_reject_info
+// in include/uapi/linux/netfilter_ipv6/ip6t_REJECT.h.
+//
+// +marshal
+type IP6TRejectInfo struct {
+	_    structs.HostLayout
+	With uint32 // reject type
+}
+
+// SizeOfIP6TRejectInfo is the size of an IP6TRejectInfo.
+const SizeOfIP6TRejectInfo = 4
+
+// IPT_ICMP_INV is a flag for ipt_icmp.
+const IPT_ICMP_INV = 0x01
+
+// IPTICMP matches ICMP packets in iptables.
+// It corresponds to struct ipt_icmp in include/uapi/linux/netfilter_ipv4/ip_tables.h.
+//
+// +marshal
+type IPTICMP struct {
+	_        structs.HostLayout
+	Type     uint8
+	Code     [2]uint8
+	Invflags uint8
+}
+
+// SizeOfIPTICMP is the size of an IPTICMP.
+const SizeOfIPTICMP = 4
+
+// IP6T_ICMP_INV is a flag for ip6t_icmp.
+const IP6T_ICMP_INV = 0x01
+
+// IP6TICMP matches ICMPv6 packets in ip6tables.
+// It corresponds to struct ip6t_icmp in include/uapi/linux/netfilter_ipv6/ip6_tables.h.
+//
+// +marshal
+type IP6TICMP struct {
+	_        structs.HostLayout
+	Type     uint8
+	Code     [2]uint8
+	Invflags uint8
+}
+
+// SizeOfIP6TICMP is the size of an IP6TICMP.
+const SizeOfIP6TICMP = 4

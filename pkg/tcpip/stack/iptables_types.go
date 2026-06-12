@@ -283,7 +283,8 @@ func (fl IPHeaderFilter) match(pkt *PacketBuffer, hook Hook, inNicName, outNicNa
 
 	case header.IPv6ProtocolNumber:
 		hdr := header.IPv6(pkt.NetworkHeader().Slice())
-		transProto = hdr.TransportProtocol()
+		// Matches Linux net/ipv6/exthdrs_core.c:ipv6_skip_exthdr()
+		transProto, _ = hdr.TryParseTransportProtocol()
 		dstAddr = hdr.DestinationAddress()
 		srcAddr = hdr.SourceAddress()
 

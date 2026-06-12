@@ -129,7 +129,10 @@ func (tm *TCPMatcher) Match(hook stack.Hook, pkt *stack.PacketBuffer, _, _ strin
 		// As in Linux, we do not perform an IPv6 fragment check. See
 		// xt_action_param.fragoff in
 		// include/linux/netfilter/x_tables.h.
-		if header.IPv6(pkt.NetworkHeader().Slice()).TransportProtocol() != header.TCPProtocolNumber {
+		hdr := header.IPv6(pkt.NetworkHeader().Slice())
+		// Matches Linux net/ipv6/exthdrs_core.c:ipv6_skip_exthdr()
+		transProto, _ := hdr.TryParseTransportProtocol()
+		if transProto != header.TCPProtocolNumber {
 			return false, false
 		}
 
@@ -138,7 +141,7 @@ func (tm *TCPMatcher) Match(hook stack.Hook, pkt *stack.PacketBuffer, _, _ strin
 		return false, false
 	}
 
-	tcpHeader := header.TCP(pkt.TransportHeader().Slice())
+	tcpHeader := header.TCP(peekTransportHeader(pkt, header.TCPMinimumSize))
 	if len(tcpHeader) < header.TCPMinimumSize {
 		// There's no valid TCP header here, so we drop the packet immediately.
 		return false, true

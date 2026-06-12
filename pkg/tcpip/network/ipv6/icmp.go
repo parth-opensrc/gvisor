@@ -1073,6 +1073,33 @@ func (*icmpReasonReassemblyTimeout) respondsToMulticast() bool {
 	return false
 }
 
+// icmpReasonBeyondScope is an error where the host is beyond scope of source address.
+type icmpReasonBeyondScope struct{}
+
+func (*icmpReasonBeyondScope) isICMPReason() {}
+
+func (*icmpReasonBeyondScope) respondsToMulticast() bool {
+	return false
+}
+
+// icmpReasonPolicy is an error where the source routing header is prohibited by policy.
+type icmpReasonPolicy struct{}
+
+func (*icmpReasonPolicy) isICMPReason() {}
+
+func (*icmpReasonPolicy) respondsToMulticast() bool {
+	return false
+}
+
+// icmpReasonRejectRoute is an error where destination route is rejected.
+type icmpReasonRejectRoute struct{}
+
+func (*icmpReasonRejectRoute) isICMPReason() {}
+
+func (*icmpReasonRejectRoute) respondsToMulticast() bool {
+	return false
+}
+
 // returnError takes an error descriptor and generates the appropriate ICMP
 // error packet for IPv6 and sends it.
 func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliveredLocally bool) tcpip.Error {
@@ -1142,7 +1169,20 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliv
 	}
 
 	if pkt.TransportProtocolNumber == header.ICMPv6ProtocolNumber {
-		if typ := header.ICMPv6(pkt.TransportHeader().Slice()).Type(); typ.IsErrorType() || typ == header.ICMPv6RedirectMsg {
+		th := pkt.TransportHeader().Slice()
+		var icmpType header.ICMPv6Type
+		if len(th) >= header.ICMPv6MinimumSize {
+			icmpType = header.ICMPv6(th).Type()
+		} else if len(th) == 0 {
+			b, ok := pkt.Data().PullUp(header.ICMPv6MinimumSize)
+			if !ok {
+				return nil
+			}
+			icmpType = header.ICMPv6(b).Type()
+		} else {
+			return nil
+		}
+		if icmpType.IsErrorType() || icmpType == header.ICMPv6RedirectMsg {
 			return nil
 		}
 	}
@@ -1166,6 +1206,12 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliv
 			return header.ICMPv6TimeExceeded, header.ICMPv6HopLimitExceeded, sent.timeExceeded, 0
 		case *icmpReasonReassemblyTimeout:
 			return header.ICMPv6TimeExceeded, header.ICMPv6ReassemblyTimeout, sent.timeExceeded, 0
+		case *icmpReasonBeyondScope:
+			return header.ICMPv6DstUnreachable, header.ICMPv6BeyondScope, sent.dstUnreachable, 0
+		case *icmpReasonPolicy:
+			return header.ICMPv6DstUnreachable, header.ICMPv6Policy, sent.dstUnreachable, 0
+		case *icmpReasonRejectRoute:
+			return header.ICMPv6DstUnreachable, header.ICMPv6RejectRoute, sent.dstUnreachable, 0
 		default:
 			panic(fmt.Sprintf("unsupported ICMP type %T", reason))
 		}

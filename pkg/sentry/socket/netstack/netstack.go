@@ -761,7 +761,11 @@ func (s *sock) isPacketBased() bool {
 
 // Readiness returns a mask of ready events for socket s.
 func (s *sock) Readiness(mask waiter.EventMask) waiter.EventMask {
-	return s.Endpoint.Readiness(mask)
+	ready := s.Endpoint.Readiness(mask)
+	if s.Endpoint.SocketOptions().PeekErr() != nil {
+		ready |= waiter.EventErr
+	}
+	return ready
 }
 
 // checkFamily returns true iff the specified address family may be used with
@@ -1509,6 +1513,14 @@ func (s *sock) getSockOptIPv6(t *kernel.Task, ep commonEndpoint, name int, outPt
 		}
 
 		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetIPv6ReceivePacketInfo()))
+		return &v, nil
+
+	case linux.IPV6_HDRINCL:
+		if outLen < sizeOfInt32 {
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetHeaderIncluded()))
 		return &v, nil
 
 	case linux.IP6T_ORIGINAL_DST:
@@ -2522,6 +2534,17 @@ func (s *sock) setSockOptIPv6(t *kernel.Task, ep commonEndpoint, name int, optVa
 		v := int32(hostarch.ByteOrder.Uint32(optVal))
 
 		ep.SocketOptions().SetIPv6ReceivePacketInfo(v != 0)
+		return nil
+
+	case linux.IPV6_HDRINCL:
+		if len(optVal) == 0 {
+			return nil
+		}
+		v, err := parseIntOrChar(optVal)
+		if err != nil {
+			return err
+		}
+		ep.SocketOptions().SetHeaderIncluded(v != 0)
 		return nil
 
 	case linux.IPV6_UNICAST_HOPS:

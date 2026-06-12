@@ -181,10 +181,14 @@ func modifyEntries4(mapper IDMapper, stk *stack.Stack, optVal []byte, replace *l
 		}
 
 		{
-			target, err := parseTarget(filter, optVal[:targetSize], false /* ipv6 */)
+			target, err := parseTarget(stk, filter, optVal[:targetSize], false /* ipv6 */)
 			if err != nil {
 				nflog("failed to parse target: %v", err)
 				return nil, err
+			}
+			if target.id().name == RejectTargetName && replace.Name.String() != filterTable {
+				nflog("REJECT target is only supported in the filter table")
+				return nil, syserr.ErrInvalidArgument
 			}
 			rule.Target = target
 		}

@@ -410,6 +410,9 @@ type NetworkHeaderParams struct {
 	// ExperimentOptionValue is a 16 bit value that is set for the IP experiment
 	// option headers if it is not zero.
 	ExperimentOptionValue uint16
+
+	// FromRawSocket indicates if the packet is sent from a raw socket.
+	FromRawSocket bool
 }
 
 // GroupAddressableEndpoint is an endpoint that supports group addressing.

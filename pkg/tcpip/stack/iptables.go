@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
@@ -771,6 +772,7 @@ func (it *IPTables) checkRule(hook Hook, pkt *PacketBuffer, table Table, ruleIdx
 	}
 
 	// All the matchers matched, so run the target.
+	log.Debugf("iptables: hook %v, rule %d matched target %+v", hook, ruleIdx, rule.Target)
 	return rule.Target.Action(pkt, hook, r, addressEP)
 }
 

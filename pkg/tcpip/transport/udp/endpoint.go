@@ -1047,7 +1047,12 @@ func (e *endpoint) HandleError(transErr stack.TransportError, pkt *stack.PacketB
 	// TODO(gvisor.dev/issues/5270): Handle all transport errors.
 	switch transErr.Kind() {
 	case stack.DestinationPortUnreachableTransportError:
-		if e.net.State() == transport.DatagramEndpointStateConnected {
+		// Matches Linux net/ipv4/udp.c:udp_err() and net/ipv6/udp.c:udpv6_err()
+		// which only notify unconnected sockets about ICMP errors if RECVERR is
+		// enabled. Connected sockets are always notified.
+		if e.net.State() == transport.DatagramEndpointStateConnected ||
+			(pkt.NetworkProtocolNumber == header.IPv4ProtocolNumber && e.SocketOptions().GetIPv4RecvError()) ||
+			(pkt.NetworkProtocolNumber == header.IPv6ProtocolNumber && e.SocketOptions().GetIPv6RecvError()) {
 			e.onICMPError(&tcpip.ErrConnectionRefused{}, transErr, pkt)
 		}
 	}

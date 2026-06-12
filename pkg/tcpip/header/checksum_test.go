@@ -345,3 +345,66 @@ func TestChecksummableTransportUpdatePseudoHeaderAddress(t *testing.T) {
 		})
 	}
 }
+
+func TestICMPv4ChecksumOddHeader(t *testing.T) {
+	rnd := rand.New(rand.NewSource(42))
+
+	// Odd length header (e.g. 9 bytes)
+	h := header.ICMPv4(make([]byte, 9))
+	if _, err := rnd.Read(h); err != nil {
+		t.Fatalf("rnd.Read failed: %v", err)
+	}
+	h.SetChecksum(0)
+
+	buf := make([]byte, 13)
+	if _, err := rnd.Read(buf); err != nil {
+		t.Fatalf("rnd.Read failed: %v", err)
+	}
+	b := buffer.MakeWithData(buf[:5])
+	b.Append(buffer.NewViewWithData(buf[5:]))
+
+	want := checksum.Checksum(b.Flatten(), 0)
+	want = ^checksum.Checksum(h, want)
+	h.SetChecksum(want)
+
+	testICMPChecksum(t, h.Checksum, func() uint16 {
+		return header.ICMPv4Checksum(h, b.Checksum(0))
+	}, want, fmt.Sprintf("header: {% x} data {% x}", h, b.Flatten()))
+}
+
+func TestICMPv6ChecksumOddHeader(t *testing.T) {
+	rnd := rand.New(rand.NewSource(42))
+
+	// Odd length header (e.g. 9 bytes)
+	h := header.ICMPv6(make([]byte, 9))
+	if _, err := rnd.Read(h); err != nil {
+		t.Fatalf("rnd.Read failed: %v", err)
+	}
+	h.SetChecksum(0)
+
+	buf := make([]byte, 13)
+	if _, err := rnd.Read(buf); err != nil {
+		t.Fatalf("rnd.Read failed: %v", err)
+	}
+	b := buffer.MakeWithData(buf[:7])
+	b.Append(buffer.NewViewWithData(buf[7:10]))
+	b.Append(buffer.NewViewWithData(buf[10:]))
+
+	dst := header.IPv6Loopback
+	src := header.IPv6Loopback
+
+	want := header.PseudoHeaderChecksum(header.ICMPv6ProtocolNumber, src, dst, uint16(len(h)+int(b.Size())))
+	want = checksum.Checksum(b.Flatten(), want)
+	want = ^checksum.Checksum(h, want)
+	h.SetChecksum(want)
+
+	testICMPChecksum(t, h.Checksum, func() uint16 {
+		return header.ICMPv6Checksum(header.ICMPv6ChecksumParams{
+			Header:      h,
+			Src:         src,
+			Dst:         dst,
+			PayloadCsum: b.Checksum(0),
+			PayloadLen:  int(b.Size()),
+		})
+	}, want, fmt.Sprintf("header: {% x} data {% x}", h, b.Flatten()))
+}

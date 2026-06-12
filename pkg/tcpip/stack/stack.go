@@ -2213,6 +2213,7 @@ func (s *Stack) WritePacketToRemote(nicID tcpip.NICID, remote tcpip.LinkAddress,
 		ReserveHeaderBytes: int(nic.MaxHeaderLength()),
 		Payload:            payload,
 	})
+	pkt.FromRawSocket = true
 	defer pkt.DecRef()
 	pkt.NetworkProtocolNumber = netProto
 	return nic.WritePacketToRemote(remote, pkt)
@@ -2231,6 +2232,7 @@ func (s *Stack) WriteRawPacket(nicID tcpip.NICID, proto tcpip.NetworkProtocolNum
 	pkt := NewPacketBuffer(PacketBufferOptions{
 		Payload: payload,
 	})
+	pkt.FromRawSocket = true
 	defer pkt.DecRef()
 	pkt.NetworkProtocolNumber = proto
 	return nic.writeRawPacketWithLinkHeaderInPayload(pkt)

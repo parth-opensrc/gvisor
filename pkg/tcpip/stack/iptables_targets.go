@@ -67,6 +67,7 @@ const (
 	RejectIPv4WithICMPNetProhibited
 	RejectIPv4WithICMPHostProhibited
 	RejectIPv4WithICMPAdminProhibited
+	RejectIPv4WithTCPReset
 )
 
 // RejectIPv4Target drops packets and sends back an error packet in response to the
@@ -87,7 +88,7 @@ func (rt *RejectIPv4Target) Action(pkt *PacketBuffer, hook Hook, _ *Route, _ Add
 		_ = rt.Handler.SendRejectionError(pkt, rt.RejectWith, hook == Input)
 		return RuleDrop, 0
 	case Prerouting, Postrouting:
-		panic(fmt.Sprintf("%s hook not supported for REDIRECT", hook))
+		panic(fmt.Sprintf("%s hook not supported for REJECT", hook))
 	default:
 		panic(fmt.Sprintf("unhandled hook = %s", hook))
 	}
@@ -109,6 +110,10 @@ const (
 	RejectIPv6WithICMPAddrUnreachable
 	RejectIPv6WithICMPPortUnreachable
 	RejectIPv6WithICMPAdminProhibited
+	RejectIPv6WithTCPReset
+	RejectIPv6WithICMPNotNeighbour
+	RejectIPv6WithICMPPolicyFail
+	RejectIPv6WithICMPRejectRoute
 )
 
 // RejectIPv6Target drops packets and sends back an error packet in response to the
@@ -129,7 +134,7 @@ func (rt *RejectIPv6Target) Action(pkt *PacketBuffer, hook Hook, _ *Route, _ Add
 		_ = rt.Handler.SendRejectionError(pkt, rt.RejectWith, hook == Input)
 		return RuleDrop, 0
 	case Prerouting, Postrouting:
-		panic(fmt.Sprintf("%s hook not supported for REDIRECT", hook))
+		panic(fmt.Sprintf("%s hook not supported for REJECT", hook))
 	default:
 		panic(fmt.Sprintf("unhandled hook = %s", hook))
 	}

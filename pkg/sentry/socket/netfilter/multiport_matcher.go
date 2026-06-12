@@ -202,28 +202,33 @@ func extractTransportHeaderPorts(hdr []byte, prot tcpip.TransportProtocolNumber)
 // port, and a boolean indicating success. If the packet does not contain
 // enough data or uses an unsupported protocol, it returns (0, 0, false).
 func extractPorts(pkt *stack.PacketBuffer) (uint16, uint16, bool) {
-	// Retrieve the transport header (TCP/UDP) from the packet buffer.
-	transportHdr := pkt.TransportHeader().Slice()
-
-	// Determine the network protocol.
+	// Determine the network protocol and transport protocol.
+	var prot tcpip.TransportProtocolNumber
 	switch pkt.NetworkProtocolNumber {
 	case header.IPv4ProtocolNumber:
-		// Extract the IPv4 header from the network header
-		// slice, then the transport protocol from it.
 		ipv4 := header.IPv4(pkt.NetworkHeader().Slice())
-		prot := ipv4.TransportProtocol()
-		return extractTransportHeaderPorts(transportHdr, prot)
+		prot = ipv4.TransportProtocol()
 
 	case header.IPv6ProtocolNumber:
-		// Similar to IPv4.
 		ipv6 := header.IPv6(pkt.NetworkHeader().Slice())
-		prot := ipv6.TransportProtocol()
-		return extractTransportHeaderPorts(transportHdr, prot)
+		// Matches Linux net/ipv6/exthdrs_core.c:ipv6_skip_exthdr()
+		prot, _ = ipv6.TryParseTransportProtocol()
 
 	default:
 		// Unsupported network protocol; cannot extract ports.
 		return 0, 0, false
 	}
+
+	var minSize int
+	switch prot {
+	case header.TCPProtocolNumber:
+		minSize = header.TCPMinimumSize
+	case header.UDPProtocolNumber:
+		minSize = header.UDPMinimumSize
+	}
+
+	transportHdr := peekTransportHeader(pkt, minSize)
+	return extractTransportHeaderPorts(transportHdr, prot)
 }
 
 // exactPortMatch return true if "srcPort" or "dstPort" are the

@@ -462,7 +462,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 			panic("expected to parse ICMPv4 header we just created")
 		}
 
-		if err := outgoingEP.writePacket(r, replyPkt); err != nil {
+		if err := outgoingEP.writePacket(r, replyPkt, false /* fromRawSocket */); err != nil {
 			sent.dropped.Increment()
 			return
 		}
@@ -698,11 +698,21 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliv
 		// if problems arise this could be reversed. It was judged less of a breach
 		// of protocol to not respond to unknown non-error packets than to respond
 		// to unknown error packets so we take the first approach.
-		if len(transportHeader) < header.ICMPv4MinimumSize {
+		if len(transportHeader)+pkt.Data().Size() < header.ICMPv4MinimumSize {
 			// The packet is malformed.
 			return nil
 		}
-		switch header.ICMPv4(transportHeader).Type() {
+		var icmpType header.ICMPv4Type
+		if len(transportHeader) > 0 {
+			icmpType = header.ICMPv4Type(transportHeader[0])
+		} else {
+			b, ok := pkt.Data().PullUp(1)
+			if !ok {
+				return nil
+			}
+			icmpType = header.ICMPv4Type(b[0])
+		}
+		switch icmpType {
 		case
 			header.ICMPv4EchoReply,
 			header.ICMPv4Echo,

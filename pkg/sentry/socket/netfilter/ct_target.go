@@ -66,7 +66,7 @@ func (*ctTargetMaker) marshal(target target) []byte {
 	return marshal.Marshal(&xt)
 }
 
-func (cm *ctTargetMaker) unmarshal(buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
+func (cm *ctTargetMaker) unmarshal(stk *stack.Stack, buf []byte, filter stack.IPHeaderFilter) (target, *syserr.Error) {
 	if len(buf) < linux.SizeOfXTCTTargetInfoV0 {
 		nflog("ctTargetMaker: buf has insufficient size for CT target %d", len(buf))
 		return nil, syserr.ErrInvalidArgument

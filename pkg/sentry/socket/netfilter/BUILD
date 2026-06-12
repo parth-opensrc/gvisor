@@ -11,6 +11,8 @@ go_library(
         "ct_target.go",
         "dnat.go",
         "extensions.go",
+        "icmp_matcher.go",
+        "icmp6_matcher.go",
         "ipv4.go",
         "ipv6.go",
         "multiport_matcher.go",
