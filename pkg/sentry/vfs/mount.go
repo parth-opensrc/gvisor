@@ -802,6 +802,10 @@ func (vfs *VirtualFilesystem) RemountAt(ctx context.Context, creds *auth.Credent
 // This method returns the mounted Mount without a reference, for convenience
 // during VFS setup when there is no chance of racing with unmount.
 func (vfs *VirtualFilesystem) MountAt(ctx context.Context, creds *auth.Credentials, source string, target *PathOperation, fsTypeName string, opts *MountOptions) (*Mount, error) {
+	// Landlock domains unconditionally restrict filesystem topology modifications like mount, umount, and pivot_root per Linux security semantics (security/landlock/fs.c).
+	if creds != nil && creds.LandlockDomain != nil {
+		return nil, linuxerr.EPERM
+	}
 	mnt, err := vfs.MountDisconnected(ctx, creds, source, fsTypeName, opts)
 	if err != nil {
 		return nil, err
@@ -815,6 +819,10 @@ func (vfs *VirtualFilesystem) MountAt(ctx context.Context, creds *auth.Credentia
 
 // UmountAt removes the Mount at the given path.
 func (vfs *VirtualFilesystem) UmountAt(ctx context.Context, creds *auth.Credentials, pop *PathOperation, opts *UmountOptions) error {
+	// Landlock domains unconditionally restrict filesystem topology modifications like mount, umount, and pivot_root per Linux security semantics (security/landlock/fs.c).
+	if creds != nil && creds.LandlockDomain != nil {
+		return linuxerr.EPERM
+	}
 	if opts.Flags&^(linux.MNT_FORCE|linux.MNT_DETACH) != 0 {
 		return linuxerr.EINVAL
 	}
@@ -1355,6 +1363,10 @@ retryFirst:
 // putOldPop. If the operation is successful, it returns virtual dentries for
 // the new root and the old root with an extra reference taken.
 func (vfs *VirtualFilesystem) PivotRoot(ctx context.Context, creds *auth.Credentials, newRootPop *PathOperation, putOldPop *PathOperation) (newRoot, oldRoot VirtualDentry, err error) {
+	// Landlock domains unconditionally restrict filesystem topology modifications like mount, umount, and pivot_root per Linux security semantics (security/landlock/fs.c).
+	if creds != nil && creds.LandlockDomain != nil {
+		return VirtualDentry{}, VirtualDentry{}, linuxerr.EPERM
+	}
 	newRoot, err = vfs.GetDentryAt(ctx, creds, newRootPop, &GetDentryOptions{CheckSearchable: true})
 	if err != nil {
 		return

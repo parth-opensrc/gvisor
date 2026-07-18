@@ -398,6 +398,9 @@ var AMD64 = &kernel.SyscallTable{
 		438: syscalls.Supported("pidfd_getfd", PIDFDGetFD),
 		439: syscalls.Supported("faccessat2", Faccessat2),
 		441: syscalls.Supported("epoll_pwait2", EpollPwait2),
+		444: syscalls.Supported("landlock_create_ruleset", LandlockCreateRuleset),
+		445: syscalls.Supported("landlock_add_rule", LandlockAddRule),
+		446: syscalls.Supported("landlock_restrict_self", LandlockRestrictSelf),
 	},
 	Emulate: map[hostarch.Addr]uintptr{
 		0xffffffffff600000: 96,  // vsyscall gettimeofday(2)
@@ -720,6 +723,9 @@ var ARM64 = &kernel.SyscallTable{
 		438: syscalls.Supported("pidfd_getfd", PIDFDGetFD),
 		439: syscalls.Supported("faccessat2", Faccessat2),
 		441: syscalls.Supported("epoll_pwait2", EpollPwait2),
+		444: syscalls.Supported("landlock_create_ruleset", LandlockCreateRuleset),
+		445: syscalls.Supported("landlock_add_rule", LandlockAddRule),
+		446: syscalls.Supported("landlock_restrict_self", LandlockRestrictSelf),
 	},
 	Emulate: map[hostarch.Addr]uintptr{},
 	Missing: func(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {

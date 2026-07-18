@@ -58,6 +58,10 @@ type Credentials struct {
 
 	// The user namespace associated with the owner of the credentials.
 	UserNamespace *UserNamespace
+
+	// LandlockDomain represents the active Landlock security domain attached to these credentials.
+	// Matches Linux [include/linux/cred.h]:struct cred::landlock_cred_security
+	LandlockDomain *LandlockDomain
 }
 
 // NewAnonymousCredentials returns a set of credentials with no capabilities in

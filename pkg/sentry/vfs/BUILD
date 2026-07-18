@@ -151,6 +151,7 @@ go_library(
         "inotify.go",
         "inotify_event_mutex.go",
         "inotify_mutex.go",
+        "landlock.go",
         "lock.go",
         "mount.go",
         "mount_list.go",

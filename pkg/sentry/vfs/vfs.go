@@ -319,6 +319,35 @@ func (vfs *VirtualFilesystem) LinkAt(ctx context.Context, creds *auth.Credential
 		return linuxerr.EINVAL
 	}
 
+	if creds != nil && creds.LandlockDomain != nil {
+		// Matches Linux [security/landlock/fs.c]:hook_path_link
+		newParentVD, _, err := vfs.getParentDirAndName(ctx, creds, newpop)
+		if err != nil {
+			oldVD.DecRef(ctx)
+			return err
+		}
+		if err := vfs.CheckLandlockAccess(ctx, creds, newParentVD, linux.LANDLOCK_ACCESS_FS_MAKE_REG); err != nil {
+			newParentVD.DecRef(ctx)
+			oldVD.DecRef(ctx)
+			return err
+		}
+		// Matches Linux [security/landlock/fs.c]:current_check_refer_path()
+		// Landlock ABI v1 forbids reparenting files between different parent directories.
+		oldParentVD, _, err := vfs.getParentDirAndName(ctx, creds, oldpop)
+		if err != nil {
+			newParentVD.DecRef(ctx)
+			oldVD.DecRef(ctx)
+			return err
+		}
+		sameParent := oldParentVD.Dentry() == newParentVD.Dentry() && oldParentVD.Mount() == newParentVD.Mount()
+		oldParentVD.DecRef(ctx)
+		newParentVD.DecRef(ctx)
+		if !sameParent {
+			oldVD.DecRef(ctx)
+			return linuxerr.EXDEV
+		}
+	}
+
 	rp := vfs.getResolvingPath(creds, newpop)
 	defer rp.Release(ctx)
 	for {
@@ -360,6 +389,19 @@ func (vfs *VirtualFilesystem) MkdirAt(ctx context.Context, creds *auth.Credentia
 	// also honored." - mkdir(2)
 	opts.Mode &= 0777 | linux.S_ISVTX
 
+	if creds != nil && creds.LandlockDomain != nil {
+		// Matches Linux [security/landlock/fs.c]:hook_path_mkdir
+		parentVD, _, err := vfs.getParentDirAndName(ctx, creds, pop)
+		if err != nil {
+			return err
+		}
+		err = vfs.CheckLandlockAccess(ctx, creds, parentVD, linux.LANDLOCK_ACCESS_FS_MAKE_DIR)
+		parentVD.DecRef(ctx)
+		if err != nil {
+			return err
+		}
+	}
+
 	rp := vfs.getResolvingPath(creds, pop)
 	defer rp.Release(ctx)
 	for {
@@ -395,6 +437,32 @@ func (vfs *VirtualFilesystem) MknodAt(ctx context.Context, creds *auth.Credentia
 	if pop.FollowFinalSymlink {
 		ctx.Warningf("VirtualFilesystem.MknodAt: file creation paths can't follow final symlink")
 		return linuxerr.EINVAL
+	}
+
+	if creds != nil && creds.LandlockDomain != nil {
+		// Matches Linux [security/landlock/fs.c]:hook_path_mknod
+		parentVD, _, err := vfs.getParentDirAndName(ctx, creds, pop)
+		if err != nil {
+			return err
+		}
+		var req uint64
+		switch opts.Mode & linux.S_IFMT {
+		case linux.S_IFCHR:
+			req = linux.LANDLOCK_ACCESS_FS_MAKE_CHAR
+		case linux.S_IFBLK:
+			req = linux.LANDLOCK_ACCESS_FS_MAKE_BLOCK
+		case linux.S_IFIFO:
+			req = linux.LANDLOCK_ACCESS_FS_MAKE_FIFO
+		case linux.S_IFSOCK:
+			req = linux.LANDLOCK_ACCESS_FS_MAKE_SOCK
+		default:
+			req = linux.LANDLOCK_ACCESS_FS_MAKE_REG
+		}
+		err = vfs.CheckLandlockAccess(ctx, creds, parentVD, req)
+		parentVD.DecRef(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	rp := vfs.getResolvingPath(creds, pop)
@@ -473,6 +541,32 @@ func (vfs *VirtualFilesystem) OpenAt(ctx context.Context, creds *auth.Credential
 		}
 		fd, err := rp.mount.fs.impl.OpenAt(ctx, rp, *opts)
 		if err == nil {
+			if creds != nil && creds.LandlockDomain != nil {
+				// Matches Linux [security/landlock/fs.c]:hook_file_open
+				var landlockReq uint64
+				if opts.FileExec {
+					landlockReq |= linux.LANDLOCK_ACCESS_FS_EXECUTE
+				}
+				accMode := opts.Flags & linux.O_ACCMODE
+				if accMode == linux.O_RDONLY || accMode == linux.O_RDWR {
+					stat, err := fd.Stat(ctx, StatOptions{Mask: linux.STATX_TYPE})
+					if err == nil && linux.FileMode(stat.Mode).IsDir() {
+						landlockReq |= linux.LANDLOCK_ACCESS_FS_READ_DIR
+					} else {
+						landlockReq |= linux.LANDLOCK_ACCESS_FS_READ_FILE
+					}
+				}
+				if accMode == linux.O_WRONLY || accMode == linux.O_RDWR {
+					landlockReq |= linux.LANDLOCK_ACCESS_FS_WRITE_FILE
+				}
+				if opts.Flags&linux.O_TRUNC != 0 {
+					landlockReq |= linux.LANDLOCK_ACCESS_FS_TRUNCATE
+				}
+				if err := vfs.CheckLandlockAccess(ctx, creds, fd.VirtualDentry(), landlockReq); err != nil {
+					fd.DecRef(ctx)
+					return nil, err
+				}
+			}
 			if opts.FileExec {
 				if fd.Mount().Options().Flags.NoExec {
 					fd.DecRef(ctx)
@@ -561,6 +655,39 @@ func (vfs *VirtualFilesystem) RenameAt(ctx context.Context, creds *auth.Credenti
 		return linuxerr.EINVAL
 	}
 
+	if creds != nil && creds.LandlockDomain != nil {
+		// Matches Linux [security/landlock/fs.c]:hook_path_rename
+		newParentVD, _, err := vfs.getParentDirAndName(ctx, creds, newpop)
+		if err != nil {
+			oldParentVD.DecRef(ctx)
+			return err
+		}
+		var removeRight, makeRight uint64
+		if oldpop.Path.Dir {
+			removeRight = linux.LANDLOCK_ACCESS_FS_REMOVE_DIR
+			makeRight = linux.LANDLOCK_ACCESS_FS_MAKE_DIR
+		} else {
+			removeRight = linux.LANDLOCK_ACCESS_FS_REMOVE_FILE
+			makeRight = linux.LANDLOCK_ACCESS_FS_MAKE_REG
+		}
+		if err := vfs.CheckLandlockAccess(ctx, creds, oldParentVD, removeRight); err != nil {
+			oldParentVD.DecRef(ctx)
+			newParentVD.DecRef(ctx)
+			return err
+		}
+		if err := vfs.CheckLandlockAccess(ctx, creds, newParentVD, makeRight); err != nil {
+			oldParentVD.DecRef(ctx)
+			newParentVD.DecRef(ctx)
+			return err
+		}
+		sameParent := oldParentVD.Dentry() == newParentVD.Dentry() && oldParentVD.Mount() == newParentVD.Mount()
+		newParentVD.DecRef(ctx)
+		if !sameParent {
+			oldParentVD.DecRef(ctx)
+			return linuxerr.EXDEV
+		}
+	}
+
 	rp := vfs.getResolvingPath(creds, newpop)
 	defer rp.Release(ctx)
 	renameOpts := *opts
@@ -601,6 +728,19 @@ func (vfs *VirtualFilesystem) RmdirAt(ctx context.Context, creds *auth.Credentia
 	if pop.FollowFinalSymlink {
 		ctx.Warningf("VirtualFilesystem.RmdirAt: file deletion paths can't follow final symlink")
 		return linuxerr.EINVAL
+	}
+
+	if creds != nil && creds.LandlockDomain != nil {
+		// Matches Linux [security/landlock/fs.c]:hook_path_rmdir
+		parentVD, _, err := vfs.getParentDirAndName(ctx, creds, pop)
+		if err != nil {
+			return err
+		}
+		err = vfs.CheckLandlockAccess(ctx, creds, parentVD, linux.LANDLOCK_ACCESS_FS_REMOVE_DIR)
+		parentVD.DecRef(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	rp := vfs.getResolvingPath(creds, pop)
@@ -699,6 +839,19 @@ func (vfs *VirtualFilesystem) SymlinkAt(ctx context.Context, creds *auth.Credent
 		return linuxerr.EINVAL
 	}
 
+	if creds != nil && creds.LandlockDomain != nil {
+		// Matches Linux [security/landlock/fs.c]:hook_path_symlink
+		parentVD, _, err := vfs.getParentDirAndName(ctx, creds, pop)
+		if err != nil {
+			return err
+		}
+		err = vfs.CheckLandlockAccess(ctx, creds, parentVD, linux.LANDLOCK_ACCESS_FS_MAKE_SYM)
+		parentVD.DecRef(ctx)
+		if err != nil {
+			return err
+		}
+	}
+
 	rp := vfs.getResolvingPath(creds, pop)
 	defer rp.Release(ctx)
 	for {
@@ -733,6 +886,19 @@ func (vfs *VirtualFilesystem) UnlinkAt(ctx context.Context, creds *auth.Credenti
 	if pop.FollowFinalSymlink {
 		ctx.Warningf("VirtualFilesystem.UnlinkAt: file deletion paths can't follow final symlink")
 		return linuxerr.EINVAL
+	}
+
+	if creds != nil && creds.LandlockDomain != nil {
+		// Matches Linux [security/landlock/fs.c]:hook_path_unlink
+		parentVD, _, err := vfs.getParentDirAndName(ctx, creds, pop)
+		if err != nil {
+			return err
+		}
+		err = vfs.CheckLandlockAccess(ctx, creds, parentVD, linux.LANDLOCK_ACCESS_FS_REMOVE_FILE)
+		parentVD.DecRef(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	rp := vfs.getResolvingPath(creds, pop)
