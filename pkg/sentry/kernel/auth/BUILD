@@ -84,6 +84,7 @@ go_library(
         "key.go",
         "keyset_mutex.go",
         "keyset_transaction_mutex.go",
+        "landlock.go",
         "user_namespace.go",
         "user_namespace_mutex.go",
     ],

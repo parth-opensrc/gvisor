@@ -28,6 +28,13 @@ func (t *Task) Credentials() *auth.Credentials {
 	return t.creds.Load()
 }
 
+// SetCredentials updates t's credentials.
+// Rationale: Required to atomically update task credentials upon Landlock domain enforcement in landlock_restrict_self.
+// Preconditions: The caller must be running on the task goroutine.
+func (t *Task) SetCredentials(creds *auth.Credentials) {
+	t.creds.Store(creds)
+}
+
 // UserNamespace returns the user namespace associated with the task.
 func (t *Task) UserNamespace() *auth.UserNamespace {
 	return t.Credentials().UserNamespace
