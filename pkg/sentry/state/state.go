@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
@@ -142,6 +143,21 @@ func (opts *SaveOpts) Save(ctx context.Context, k *kernel.Kernel, w *watchdog.Wa
 	w.Stop()
 	defer w.Start()
 
+	// Exclude application MemoryFile usage from the Go heap budget while
+	// encoding state with GC suspended.
+	var memoryFileBytes uint64
+	if mf := k.MemoryFile(); mf != nil {
+		if u, err := mf.TotalUsage(); err == nil {
+			memoryFileBytes = u
+		}
+	}
+	// Suspend GC to avoid scanning the transient object graph during save; only
+	// resume if the sandbox continues running.
+	gcSuspension := suspendGCForSave(memoryFileBytes)
+	if opts.Resume {
+		defer gcSuspension.End()
+	}
+
 	// Supplement the metadata.
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]string)
@@ -161,6 +177,7 @@ func (opts *SaveOpts) Save(ctx context.Context, k *kernel.Kernel, w *watchdog.Wa
 		wt += w
 	}
 	opts.Metadata[GvisorCPUUsageKey] = t.String()
+	opts.Metadata[metadataMemoryFileUsedBytesKey] = strconv.FormatUint(memoryFileBytes, 10 /* base */)
 	if wt != 0 {
 		opts.Metadata[GvisorWallTimeKey] = wt.String()
 	}

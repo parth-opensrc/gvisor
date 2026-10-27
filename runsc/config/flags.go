@@ -53,6 +53,7 @@ const (
 	flagQDiscTBFBurst           = "qdisc-tbf-burst"
 	flagInSandboxCgroup         = "in-sandbox-cgroup"
 	flagNetworkProxyPath        = "network-proxy-path"
+	flagSuspendLifecycleGC      = "suspend-lifecycle-gc"
 
 	maxQDiscTBFBurst     = uint64(1<<32 - 1)
 	defaultQDiscTBFRate  = uint64(0)
@@ -141,6 +142,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 
 	// Flags that control sandbox runtime behavior: MM related.
 	flagSet.Bool("app-huge-pages", true, "enable use of huge pages for application memory; requires /sys/kernel/mm/transparent_hugepage/shmem_enabled = advise")
+	flagSet.Var(SuspendLifecycleGCAll.Ptr(), flagSuspendLifecycleGC, "controls whether Go garbage collection is suspended in the sentry during sandbox startup, checkpoint, and restore: all (default) or none.")
 
 	// Flags that control sandbox runtime behavior: FS related.
 	flagSet.Var(fileAccessTypePtr(FileAccessExclusive), "file-access", "specifies which filesystem validation to use for the root mount: exclusive (default), shared.")
@@ -235,6 +237,7 @@ var overrideAllowlist = map[string]struct {
 	flagQDiscTBFRate:            {check: checkQDiscTBFRate},
 	flagQDiscTBFBurst:           {check: checkQDiscTBFBurst},
 	flagInSandboxCgroup:         {},
+	flagSuspendLifecycleGC:      {check: checkSuspendLifecycleGC},
 }
 
 // checkOverlay2 ensures that overlay2 can only be enabled using "memory" or
@@ -304,6 +307,19 @@ func checkQDiscTBFBurst(c *Config, name string, value string) error {
 	if c.TBFBurst != 0 && v > c.TBFBurst {
 		return fmt.Errorf("%s=%d exceeds runtime-configured burst %d; raising the limit requires flag %q to be enabled",
 			name, v, c.TBFBurst, flagAllowFlagOverride)
+	}
+	return nil
+}
+
+// checkSuspendLifecycleGC ensures an annotation cannot enable lifecycle GC
+// suspension when disabled on the runtime.
+func checkSuspendLifecycleGC(c *Config, name string, value string) error {
+	var p SuspendLifecycleGCPolicy
+	if err := p.Set(value); err != nil {
+		return err
+	}
+	if c.SuspendLifecycleGC == SuspendLifecycleGCNone && p != SuspendLifecycleGCNone {
+		return fmt.Errorf("enabling %q requires flag %q to be enabled", name, flagAllowFlagOverride)
 	}
 	return nil
 }

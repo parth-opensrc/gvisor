@@ -306,6 +306,11 @@ func TestInvalidFlags(t *testing.T) {
 			value: "LEGACY_DEPRECATED_SLOW_EMBEDDED_FALLBACK",
 			error: "the embedded sidecar fallback has been removed",
 		},
+		{
+			name:  "suspend-lifecycle-gc",
+			value: "invalid",
+			error: "invalid suspend-lifecycle-gc policy",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			testFlags := flag.NewFlagSet("test", flag.ContinueOnError)
@@ -664,6 +669,29 @@ func TestOverrideAllowlist(t *testing.T) {
 		{
 			flag:  "in-sandbox-cgroup",
 			value: "v2",
+		},
+		{
+			flag:  "suspend-lifecycle-gc",
+			value: "all",
+		},
+		{
+			flag:  "suspend-lifecycle-gc",
+			value: "none",
+		},
+		{
+			flag:  "suspend-lifecycle-gc",
+			value: "all",
+			error: `enabling "suspend-lifecycle-gc" requires flag`,
+		},
+		{
+			flag:  "suspend-lifecycle-gc",
+			value: "all",
+			force: true,
+		},
+		{
+			flag:  "suspend-lifecycle-gc",
+			value: "invalid",
+			error: "invalid suspend-lifecycle-gc policy",
 		},
 		{
 			flag:  "oci-seccomp",

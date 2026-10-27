@@ -383,6 +383,10 @@ type Config struct {
 	// AppHugePages enables support for application huge pages.
 	AppHugePages bool `flag:"app-huge-pages"`
 
+	// SuspendLifecycleGC controls whether Go garbage collection is suspended
+	// in the sentry during sandbox startup, checkpoint, and restore.
+	SuspendLifecycleGC SuspendLifecycleGCPolicy `flag:"suspend-lifecycle-gc"`
+
 	// NVProxy enables support for Nvidia GPUs.
 	NVProxy bool `flag:"nvproxy"`
 
@@ -1921,4 +1925,55 @@ func (xd *XDP) Set(input string) error {
 		return fmt.Errorf("invalid --xdp value: %q", input)
 	}
 	return nil
+}
+
+// SuspendLifecycleGCPolicy controls whether the sentry suspends Go garbage
+// collection during sandbox lifecycle operations.
+type SuspendLifecycleGCPolicy int
+
+// SuspendLifecycleGCPolicy values.
+const (
+	// SuspendLifecycleGCAll suspends Go garbage collection in the sentry
+	// during sandbox startup, checkpoint, and restore.
+	SuspendLifecycleGCAll SuspendLifecycleGCPolicy = iota
+
+	// SuspendLifecycleGCNone leaves Go garbage collection running normally
+	// during sandbox lifecycle operations.
+	SuspendLifecycleGCNone
+)
+
+// Set implements flag.Value. Set(String()) should be idempotent.
+func (p *SuspendLifecycleGCPolicy) Set(v string) error {
+	switch v {
+	case "all":
+		*p = SuspendLifecycleGCAll
+	case "none":
+		*p = SuspendLifecycleGCNone
+	default:
+		return fmt.Errorf("invalid suspend-lifecycle-gc policy %q (must be one of: all, none)", v)
+	}
+	return nil
+}
+
+// Ptr returns a pointer to `p`.
+// Useful in flag declaration line.
+func (p SuspendLifecycleGCPolicy) Ptr() *SuspendLifecycleGCPolicy {
+	return &p
+}
+
+// Get implements flag.Get.
+func (p *SuspendLifecycleGCPolicy) Get() any {
+	return *p
+}
+
+// String implements flag.String.
+func (p SuspendLifecycleGCPolicy) String() string {
+	switch p {
+	case SuspendLifecycleGCAll:
+		return "all"
+	case SuspendLifecycleGCNone:
+		return "none"
+	default:
+		panic(fmt.Sprintf("invalid suspend-lifecycle-gc policy %d", p))
+	}
 }

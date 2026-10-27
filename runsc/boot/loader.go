@@ -21,7 +21,6 @@ import (
 	"maps"
 	"os"
 	"runtime"
-	runtimedebug "runtime/debug"
 	"strconv"
 	"strings"
 	gtime "time"
@@ -37,6 +36,7 @@ import (
 	"gvisor.dev/gvisor/pkg/coverage"
 	"gvisor.dev/gvisor/pkg/cpuid"
 	"gvisor.dev/gvisor/pkg/fd"
+	"gvisor.dev/gvisor/pkg/garbage"
 	"gvisor.dev/gvisor/pkg/gomaxprocs"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/memutil"
@@ -261,12 +261,15 @@ type Loader struct {
 
 	hostTHP HostTHP
 
+	// startupGC holds the initial boot GC suspension, if any.
+	startupGC *garbage.Suspension
+
 	// startupHeapReleasePending is true while a goroutine waits to return
 	// the free Sentry heap memory to the host. See
 	// Loader.releaseStartupHeapWhenIdle.
 	startupHeapReleasePending atomicbitops.Bool
 
-	// freeOSMemory is runtimedebug.FreeOSMemory, replaced in tests.
+	// freeOSMemory is garbage.FreeOSMemory, replaced in tests.
 	freeOSMemory func()
 
 	// saveMu serializes save operations. Saves can be requested concurrently:
@@ -574,6 +577,10 @@ type Args struct {
 	// The `Loader` records midpoints on it as it goes through loader creation
 	// and sandbox startup. The `Loader` does not take ownership of it.
 	StartupTimer *timing.Timer
+
+	// StartupGC holds the garbage collector suspension acquired at the start
+	// of sandbox boot, if any. Once New succeeds, the Loader owns it.
+	StartupGC *garbage.Suspension
 }
 
 // HostTHP holds host transparent hugepage settings.
@@ -694,7 +701,8 @@ func New(args Args) (*Loader, error) {
 	eid := execID{cid: args.ID}
 	l := &Loader{
 		sandboxID:    args.ID,
-		freeOSMemory: runtimedebug.FreeOSMemory,
+		startupGC:    args.StartupGC,
+		freeOSMemory: garbage.FreeOSMemory,
 		noRootContainer: noRootContainer{
 			enabled: args.NoRootContainer,
 			exit:    make(chan struct{}),
@@ -1150,6 +1158,7 @@ func createProcessArgs(id string, spec *specs.Spec, conf *config.Config, creds *
 // +checklocksexclude:l.mu
 // +checklocksexclude:l.k.fsSaveMu
 func (l *Loader) Destroy() {
+	l.startupGC.End()
 	l.noRootContainer.stop()
 	if l.stopSignalForwarding != nil {
 		l.stopSignalForwarding()
@@ -1380,6 +1389,10 @@ func (l *Loader) Run() error {
 // before the Sentry returns its free startup heap memory to the host.
 const startupHeapReleaseIdleDelay = 250 * gtime.Millisecond
 
+// startupGCResumeDelay bounds how long startup GC suspension stays active
+// after a cold start if the application does not go idle first.
+const startupGCResumeDelay = 500 * gtime.Millisecond
+
 // releaseStartupHeapWhenIdle returns the free Sentry heap memory to the host
 // when the application is next idle for startupHeapReleaseIdleDelay. If a
 // release is already pending, it does nothing.
@@ -1388,15 +1401,20 @@ func (l *Loader) releaseStartupHeapWhenIdle() {
 		return
 	}
 	k := l.k
+	startupGC := l.startupGC
 	go func() {
 		k.WaitForIdle(startupHeapReleaseIdleDelay)
 		l.startupHeapReleasePending.Store(false)
+		startupGC.End()
 		l.freeOSMemory()
 	}()
 }
 
 // +checklocksexclude:l.mu
 func (l *Loader) run() error {
+	cu := cleanup.Make(l.startupGC.End)
+	defer cu.Clean()
+
 	if l.root.conf.Network == config.NetworkHost {
 		// Delay host network configuration to this point because network namespace
 		// is configured after the loader is created and before Run() is called.
@@ -1545,6 +1563,7 @@ func (l *Loader) run() error {
 	switch l.state {
 	case created:
 		l.state = started
+		gtime.AfterFunc(startupGCResumeDelay, l.startupGC.End)
 		l.releaseStartupHeapWhenIdle()
 	case restoringUnstarted:
 		// A restored sandbox releases its startup heap once the restore is
@@ -1553,6 +1572,7 @@ func (l *Loader) run() error {
 	default:
 		panic(fmt.Sprintf("state=%s in Loader.run() should be impossible", l.state))
 	}
+	cu.Release()
 	return nil
 }
 

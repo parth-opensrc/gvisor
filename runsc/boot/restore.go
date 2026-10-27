@@ -372,6 +372,11 @@ func (r *restoreMounts) String() string {
 
 func (r *restorer) restore(l *Loader) error {
 	log.Infof("Starting to restore %d containers", len(r.containers))
+	// Suspend GC while decoding checkpoint state, tightening any active startup
+	// suspension limit to account for restored MemoryFile usage.
+	gcSuspension := state.SuspendGCForRestore(r.metadata)
+	defer gcSuspension.End()
+	l.startupGC.End()
 
 	// Validate the container specs to ensure they did not meaningfully change
 	// between checkpoint and restore.

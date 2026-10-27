@@ -20,6 +20,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	runtimedebug "runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"gvisor.dev/gvisor/pkg/control/server"
 	"gvisor.dev/gvisor/pkg/cpuid"
 	"gvisor.dev/gvisor/pkg/fspath"
+	"gvisor.dev/gvisor/pkg/garbage"
 	"gvisor.dev/gvisor/pkg/lisafs"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
@@ -264,11 +266,50 @@ func TestRestoreFailBeforeStart(t *testing.T) {
 	}
 	defer l.Destroy()
 	defer cleanup()
+
+	runtime.GC()
+	l.startupGC = garbage.Suspend(garbage.NoMemoryLimit, 0 /* untrackedMem */)
+	defer l.startupGC.End()
+
 	if err := l.ctrl.manager.Restore(&sentryapi.RestoreOpts{}, nil); err == nil {
 		t.Fatalf("restoring without files succeeded")
 	}
 	if err := l.waitRestore(); err == nil {
 		t.Errorf("waiting for the failed restore succeeded")
+	}
+	got := runtimedebug.SetGCPercent(-1 /* percent */)
+	runtimedebug.SetGCPercent(got)
+	if got < 0 {
+		t.Errorf("GCPercent after failed restore = %d, want >= 0", got)
+	}
+}
+
+// TestStartupGCResumeOnRunError checks that a failed Loader.run resumes any
+// startup GC suspension.
+func TestStartupGCResumeOnRunError(t *testing.T) {
+	l, cleanup, err := createLoader(testConfig(), testSpec())
+	if err != nil {
+		t.Fatalf("error creating loader: %v", err)
+	}
+	defer l.Destroy()
+	defer cleanup()
+	defer l.ctrl.srv.Stop(time.Hour)
+
+	runtime.GC()
+	l.startupGC = garbage.Suspend(garbage.NoMemoryLimit, 0 /* untrackedMem */)
+	defer l.startupGC.End()
+
+	l.mu.Lock()
+	l.state = restoreFailed
+	l.mu.Unlock()
+
+	if err := l.run(); err == nil {
+		t.Fatalf("l.run() in state=restoreFailed succeeded")
+	}
+	got := runtimedebug.SetGCPercent(-1 /* percent */)
+	runtimedebug.SetGCPercent(got)
+	if got < 0 {
+		t.Errorf("GCPercent after failed run = %d, want >= 0", got)
 	}
 }
 
@@ -296,7 +337,8 @@ func expectOneStartupHeapRelease(t *testing.T, released <-chan struct{}) {
 }
 
 // TestStartupHeapReleaseOnStart checks that the startup heap is released once
-// after the root container starts.
+// after the root container starts, keeping startupGC suspended across start
+// and resuming it before releasing the heap.
 func TestStartupHeapReleaseOnStart(t *testing.T) {
 	l, cleanup, err := createLoader(testConfig(), testSpec())
 	if err != nil {
@@ -304,13 +346,39 @@ func TestStartupHeapReleaseOnStart(t *testing.T) {
 	}
 	defer l.Destroy()
 	defer cleanup()
-	released := watchStartupHeapReleases(l)
+
+	runtime.GC()
+	l.startupGC = garbage.Suspend(garbage.NoMemoryLimit, 0 /* untrackedMem */)
+	defer l.startupGC.End()
+
+	gcPercentAtRelease := make(chan int, 1)
+	released := make(chan struct{}, 10)
+	l.freeOSMemory = func() {
+		prev := runtimedebug.SetGCPercent(-1 /* percent */)
+		runtimedebug.SetGCPercent(prev)
+		select {
+		case gcPercentAtRelease <- prev:
+		default:
+		}
+		released <- struct{}{}
+	}
 
 	go func() { <-l.ctrl.manager.startResultChan }()
+	startTime := time.Now()
 	if err := l.Run(); err != nil {
 		t.Fatalf("error running container: %v", err)
 	}
+	if time.Since(startTime) < startupHeapReleaseIdleDelay/2 {
+		got := runtimedebug.SetGCPercent(-1 /* percent */)
+		runtimedebug.SetGCPercent(got)
+		if got >= 0 {
+			t.Errorf("GCPercent immediately after Run = %d, want < 0", got)
+		}
+	}
 	expectOneStartupHeapRelease(t, released)
+	if got := <-gcPercentAtRelease; got < 0 {
+		t.Errorf("GCPercent during freeOSMemory = %d, want >= 0 (startupGC resumed first)", got)
+	}
 	if status := l.WaitExit(); !status.Exited() || status.ExitStatus() != 0 {
 		t.Errorf("application exited with %s, want exit status 0", status)
 	}
